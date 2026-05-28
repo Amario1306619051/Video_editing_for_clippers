@@ -1,0 +1,16 @@
+{
+  "_comment": "Stub. Batch mode belum diwire-up. Lihat Roadmap #6 di CLAUDE.md.",
+  "jobs": [
+    {
+      "url": "https://www.youtube.com/watch?v=EXAMPLE",
+      "start": "00:00:10",
+      "end": "00:00:40",
+      "title": "example-clip",
+      "description": "",
+      "box1": {"x": 0, "y": 0, "w": 1920, "h": 1080},
+      "box2": null,
+      "caption_font": "Bricolage Grotesque",
+      "caption_size": 64
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# ---- Runtime data / outputs (NEVER PUSH) ----
+temp/
+output/
+*.mp4
+*.ass
+*.srt
+
+# ---- Cookies / secrets (YouTube auth) ----
+cookies.txt
+*cookies*.txt
+*.netrc
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Virtualenv ----
+venv/
+.venv/
+env/
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
