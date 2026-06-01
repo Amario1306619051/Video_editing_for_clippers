@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -8,6 +9,16 @@ from models import Keyframe, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Bundled caption fonts (OFL, redistributable). libass is pointed here via the
+# subtitles filter `fontsdir=` so burned captions use these instead of falling
+# back to a generic host sans. Family names: "Anton", "Bebas Neue".
+FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+
+# Caption highlight colors (TikTok karaoke): inactive words white, the word
+# currently being spoken pops to the accent color.
+CAPTION_FILL = "#FFFFFF"
+CAPTION_HIGHLIGHT = "#E8FF3A"
 
 OUT_W = 1080
 OUT_H = 1920
@@ -121,6 +132,8 @@ def _group_words(words: list[Word]) -> list[dict]:
             "text": text,
             "start": buf[0].start,
             "end": buf[-1].end,
+            # per-word timing kept so _build_ass can highlight the active word
+            "words": [{"text": w.word, "start": w.start, "end": w.end} for w in buf],
         })
         buf = []
         buf_chars = 0
@@ -143,8 +156,16 @@ def _build_ass(groups: list[dict], font: str, size: int, caption_y_for) -> str:
     """`caption_y_for` is either an int (single y for all groups) or a callable
     taking a group's start time and returning the y to use. Per-group y enables
     caption repositioning when the layout switches between vstack and
-    single-box mode (see layout-switch overlays in render())."""
-    primary = to_ass_color("#FFFFFF")
+    single-box mode (see layout-switch overlays in render()).
+
+    TikTok-karaoke style: each word group is emitted as one Dialogue line per
+    word time-slice; in each slice every word is shown but the word currently
+    being spoken is recolored to the accent + bumped slightly in scale. Whisper
+    per-word timestamps (kept in group["words"]) drive the slice boundaries.
+    Fat outline + shadow so it reads over any footage.
+    """
+    primary = to_ass_color(CAPTION_FILL)
+    highlight = to_ass_color(CAPTION_HIGHLIGHT)
     outline = to_ass_color("#000000")
     back = to_ass_color("#000000")
 
@@ -157,7 +178,7 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{font},{size},{primary},{primary},{outline},{back},1,0,0,0,100,100,0,0,1,4,2,5,40,40,0,1
+Style: Caption,{font},{size},{primary},{primary},{outline},{back},1,0,0,0,100,100,0,0,1,6,3,5,40,40,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -167,12 +188,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     lines = []
     for g in groups:
-        text = _ass_escape(g["text"]).upper()
+        words = g.get("words") or [{"text": g["text"], "start": g["start"], "end": g["end"]}]
         y = int(resolve_y(g["start"]))
-        positioned = f"{{\\pos({OUT_W // 2},{y})}}{text}"
-        lines.append(
-            f"Dialogue: 0,{_fmt_ass_time(g['start'])},{_fmt_ass_time(g['end'])},Caption,,0,0,0,,{positioned}"
-        )
+        pos = f"{{\\pos({OUT_W // 2},{y})}}"
+        n = len(words)
+        for j in range(n):
+            seg_start = words[j]["start"]
+            seg_end = words[j + 1]["start"] if j + 1 < n else g["end"]
+            if seg_end <= seg_start:
+                seg_end = seg_start + 0.05
+            parts = []
+            for k, wk in enumerate(words):
+                t = _ass_escape(wk["text"]).upper()
+                if k == j:
+                    # active word: accent fill + slight pop, then reset to white/100%
+                    parts.append(f"{{\\1c{highlight}\\fscx112\\fscy112}}{t}{{\\1c{primary}\\fscx100\\fscy100}}")
+                else:
+                    parts.append(t)
+            text = pos + " ".join(parts)
+            lines.append(
+                f"Dialogue: 0,{_fmt_ass_time(seg_start)},{_fmt_ass_time(seg_end)},Caption,,0,0,0,,{text}"
+            )
     return header + "\n".join(lines) + "\n"
 
 
@@ -446,6 +482,33 @@ def _crop_chain(input_label: str, keyframes: list[Keyframe],
     return parts
 
 
+def _probe_dims(path: Path) -> tuple[int, int]:
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=width,height", "-of", "json", str(path)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        s = json.loads(out.stdout).get("streams", [{}])[0]
+        return int(s.get("width", 0)), int(s.get("height", 0))
+    except Exception:
+        return 0, 0
+
+
+def _clamp_kfs(kfs: Optional[list[Keyframe]], w: int, h: int) -> Optional[list[Keyframe]]:
+    """Defense-in-depth: cap every keyframe's box inside the source frame so an
+    off-frame box (from a direct API/batch call) can't make ffmpeg's crop fail.
+    No-op for already-in-bounds boxes."""
+    if not kfs or w <= 0 or h <= 0:
+        return kfs
+    out: list[Keyframe] = []
+    for k in kfs:
+        x = min(max(0.0, float(k.x)), max(0.0, w - 2.0))
+        y = min(max(0.0, float(k.y)), max(0.0, h - 2.0))
+        cw = max(2.0, min(float(k.w), w - x))
+        ch = max(2.0, min(float(k.h), h - y))
+        out.append(k.model_copy(update={"x": x, "y": y, "w": cw, "h": ch}))
+    return out
+
+
 # ───────────────────────── main render ─────────────────────────
 
 def render(
@@ -479,6 +542,12 @@ def render(
             box2 = _shift_keyframes(box2, rs)
         if words:
             words = _shift_words(words, rs, re_)
+
+    # Defense-in-depth: clamp boxes inside the actual source frame (no-op for
+    # valid boxes; prevents an off-frame crop from crashing ffmpeg).
+    _sw, _sh = _probe_dims(source_path)
+    box1 = _clamp_kfs(box1, _sw, _sh)
+    box2 = _clamp_kfs(box2, _sw, _sh)
 
     filename = f"{_slugify(title)}_{job_id}.mp4"
     output_path = OUTPUT_DIR / filename
@@ -546,8 +615,11 @@ def render(
 
     # Subtitle path escape — Windows drive letters break filter parsing
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
+    fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
     if groups:
-        parts.append(f"[{last}]subtitles={ass_path_escaped}[outv]")
+        # fontsdir → libass uses the bundled Anton/Bebas Neue instead of a
+        # generic host-font fallback (which made captions look plain).
+        parts.append(f"[{last}]subtitles={ass_path_escaped}:fontsdir={fonts_escaped}[outv]")
         vmap = "[outv]"
     else:
         vmap = f"[{last}]"

@@ -30,7 +30,7 @@ const state = {
   activeBox: null,          // null = canvas inactive ; 1 or 2 = active draw target
   currentTime: 0,
   words: [],
-  caption: { font: 'Bricolage Grotesque', size: 64 },
+  caption: { font: 'Anton', size: 64 },  // must match the default <option> in index.html
   renderRange: { start: null, end: null },  // sub-range in seconds, null = open
   drag: null,
   result: null,
@@ -299,6 +299,22 @@ function lockAspect(w, h, aspect) {
 
 function aspectForBox(n) {
   return n === 1 ? ASPECT_TOP : ASPECT_BOTTOM;
+}
+
+// ───────────────────────── render-area (crop) guide ─────────────────────────
+// Boxes are FREE-FORM (draw any size/AR). The slot has a fixed AR, so in COVER
+// mode the render keeps only the centered slot-AR sub-rect of the box (the rest
+// is cropped); in BLUR_PAD mode the whole box renders (contained, blurred pad).
+// coverKeepRect returns the kept sub-rect for cover — drawn as a guide on the
+// overlay so what you see kept == the right-side preview == the render.
+// Mirrors backend renderer._crop_chain cover (scale-cover + centered crop) and
+// the preview drawCover math.
+function coverKeepRect(box, aspect) {
+  const boxAR = box.w / box.h;
+  let kw, kh;
+  if (boxAR > aspect) { kh = box.h; kw = box.h * aspect; }  // box wider → crop L/R
+  else { kw = box.w; kh = box.w / aspect; }                 // box taller → crop T/B
+  return { x: box.x + (box.w - kw) / 2, y: box.y + (box.h - kh) / 2, w: kw, h: kh };
 }
 
 // ───────────────────────── keyframe interpolation ─────────────────────────
@@ -858,7 +874,7 @@ function onDragEnd(e) {
     y = startSrc.y - h / 2;
     how = 'placed (size inherited)';
   } else {
-    // Free-form draw — box matches exactly what user dragged. No aspect lock.
+    // Free-form draw — box is exactly the rectangle dragged (any size/AR).
     x = Math.min(startSrc.x, current.x);
     y = Math.min(startSrc.y, current.y);
     w = Math.abs(dx);
@@ -947,6 +963,26 @@ function drawBox(ctx, box, color, label, boxNum) {
   ctx.fillStyle = color;
   ctx.font = 'bold 11px JetBrains Mono, monospace';
   ctx.fillText(label + (isOnKeyframe ? '' : ' [interpolated]'), a.x + 4, a.y + 14);
+
+  // Render-area guide: show exactly what ends up in the slot for this box's
+  // current fit. COVER → dim the cropped margins + outline the kept centered
+  // slot-AR sub-rect. BLUR_PAD → whole box renders (contained), no crop.
+  const fit = currentFit(boxNum);
+  if (fit !== 'blur_pad' && box.w > 1 && box.h > 1) {
+    const keep = coverKeepRect(box, aspectForBox(boxNum));
+    const ka = sourceToOverlay(keep.x, keep.y);
+    const kb = sourceToOverlay(keep.x + keep.w, keep.y + keep.h);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';  // dim the parts that get cropped away
+    if (ka.x > a.x) ctx.fillRect(a.x, a.y, ka.x - a.x, b.y - a.y);          // left
+    if (kb.x < b.x) ctx.fillRect(kb.x, a.y, b.x - kb.x, b.y - a.y);         // right
+    if (ka.y > a.y) ctx.fillRect(a.x, a.y, b.x - a.x, ka.y - a.y);          // top
+    if (kb.y < b.y) ctx.fillRect(a.x, kb.y, b.x - a.x, b.y - kb.y);         // bottom
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    ctx.strokeRect(ka.x, ka.y, kb.x - ka.x, kb.y - ka.y);
+    ctx.setLineDash([]);
+  }
 
   // Corner resize handles + × delete handle — only when this box is the active target.
   if (isActive) {
@@ -1096,10 +1132,32 @@ function redrawPreview(canvas) {
   }
 }
 
+// Caption shown at currentTime — mirrors the burned caption (word group around
+// `time`) instead of a fixed sample, so the preview caption matches the rendered
+// caption at the same moment. Lets the user align preview ↔ download by caption.
+function captionTextAt(time) {
+  const words = state.words;
+  if (!words.length) return 'YOUR CAPTION';
+  let i = words.findIndex((w) => time >= w.start && time < w.end);
+  if (i < 0) {                                  // between words → last that started
+    for (let j = 0; j < words.length; j++) {
+      if (words[j].start <= time) i = j; else break;
+    }
+  }
+  if (i < 0) i = 0;
+  const out = [];
+  let chars = 0;
+  for (let j = i; j < words.length && out.length < 3; j++) {  // up to 3 words, ≤18 chars
+    const wd = words[j].word;
+    if (out.length && chars + 1 + wd.length > 18) break;
+    out.push(wd);
+    chars += (chars ? 1 : 0) + wd.length;
+  }
+  return out.join(' ').toUpperCase().slice(0, 18) || '...';
+}
+
 function drawCaptionPreview(ctx, y) {
-  const t = state.words.length
-    ? (state.words.slice(0, 3).map(w => w.word).join(' ').toUpperCase().slice(0, 18))
-    : 'YOUR CAPTION';
+  const t = captionTextAt(state.currentTime);
   const scale = PREVIEW_W / OUT_W;
   const fs = Math.max(10, state.caption.size * scale);
   ctx.save();
@@ -1254,7 +1312,7 @@ function showResultHeader(withCaption) {
 }
 
 function buildRenderBody(withWords) {
-  return {
+  const body = {
     job_id: state.jobId,
     title: $('#f-title').value.trim() || 'clip',
     box1: state.keyframes[1].length ? state.keyframes[1] : null,
@@ -1266,6 +1324,24 @@ function buildRenderBody(withWords) {
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
   };
+  logBoxes(body);
+  return body;
+}
+
+// Print the bbox keyframes being sent to render (open F12 → Console to read).
+function logBoxes(body) {
+  const src = state.source ? `${state.source.width}x${state.source.height}` : '?';
+  console.log(`%c[RENDER] source=${src} range=(${body.render_start},${body.render_end})`,
+    'color:#e8ff3a;font-weight:bold');
+  for (const [name, box] of [['box1 TOP 3:2', body.box1], ['box2 BOTTOM 9:10', body.box2]]) {
+    if (!box) { console.log(`  ${name}: (none)`); continue; }
+    console.log(`  ${name}: ${box.length} kf`);
+    console.table(box.map((k) => ({
+      t: +k.t.toFixed(2), x: Math.round(k.x), y: Math.round(k.y),
+      w: Math.round(k.w), h: Math.round(k.h), AR: +(k.w / k.h).toFixed(3),
+      fit: k.fit, interp: k.interp, gap: k.gap,
+    })));
+  }
 }
 
 // ───────────────────────── render sub-range ─────────────────────────

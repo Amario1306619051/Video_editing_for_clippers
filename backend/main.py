@@ -51,6 +51,30 @@ def api_transcribe(req: TranscribeRequest):
     return {"words": words}
 
 
+def _print_boxes(req: RenderRequest, src) -> None:
+    """Debug: dump the bbox keyframes received for this render so the framing
+    can be inspected against the preview. Shows source dims too (to spot a box
+    that exceeds the frame)."""
+    try:
+        sw, sh = renderer._probe_dims(src)
+    except Exception:
+        sw = sh = 0
+    print(f"\n[RENDER] job={req.job_id} title={req.title!r} source={sw}x{sh} "
+          f"range=({req.render_start},{req.render_end}) caption={req.caption_font}/{req.caption_size}")
+    for name, box in (("box1 (TOP 3:2)", req.box1), ("box2 (BOTTOM 9:10)", req.box2)):
+        if not box:
+            print(f"  {name}: (none)")
+            continue
+        print(f"  {name}: {len(box)} keyframe(s)")
+        for k in box:
+            off = ""
+            if sw and sh and (k.x < 0 or k.y < 0 or k.x + k.w > sw or k.y + k.h > sh):
+                off = "  <-- OFF-FRAME (will be clamped)"
+            ar = (k.w / k.h) if k.h else 0
+            print(f"    t={k.t:6.2f}s  x={k.x:7.1f} y={k.y:7.1f} w={k.w:7.1f} h={k.h:7.1f} "
+                  f"AR={ar:.3f}  fit={k.fit:<8} interp={k.interp:<6} gap={k.gap}{off}")
+
+
 @app.post("/api/render", response_model=RenderResponse)
 def api_render(req: RenderRequest):
     if not req.box1 and not req.box2:
@@ -59,6 +83,7 @@ def api_render(req: RenderRequest):
         src = downloader.get_source_path(req.job_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    _print_boxes(req, src)
     try:
         result = renderer.render(
             job_id=req.job_id,

@@ -116,8 +116,14 @@ There are **three** in play. Don't mix them up:
 
 `app.js` has `overlayToSource()` and `sourceToOverlay()` — always go through these. Don't shortcut.
 
-### Box drawing — no aspect lock
-Source-crop boxes are **free-form**: the box is exactly whatever rectangle the user dragged (no aspect snap). The output slots have fixed aspects (3:2 top, 9:10 bottom), and ffmpeg's `scale=...:force_original_aspect_ratio=increase, crop=OUT_W:OUT_H` chain handles fitting any source crop into a slot by cover/center-crop. So a 200×200 source crop into the top slot shows the center 200×133 strip of that crop, scaled up — that's a backend-side detail the user accepts in exchange for being able to draw any rectangle. (`lockAspect` is still in the source for reference but unused.)
+### Box drawing — free-form + render-area guide (WYSIWYG)
+Source-crop boxes are **free-form** (any size/AR). Slots have fixed AR (3:2 top, 9:10 bottom). WYSIWYG is achieved NOT by locking the box AR, but by **showing what actually renders**:
+- `drawBox` overlays a **render-area guide**: in COVER mode it dims the cropped margins + outlines (dashed white) the centered slot-AR sub-rect that survives — `coverKeepRect`, which mirrors the backend cover math and the preview `drawCover`. In BLUR_PAD mode the whole box renders (contained, blurred pad) so no guide/dimming.
+- The right-side preview canvas (`drawSlot`/`drawCover`) already shows the exact cover/blur result — verified pixel-identical to the render (44.6 dB PSNR, compression only).
+
+History: an earlier attempt LOCKED the box to the slot AR to force box==output. Owner rejected it — they want free custom sizing, and noted blur_pad already shows the full box uncropped. So the lock was reverted in favour of the render-area guide. **Don't re-introduce aspect-lock**; if box==output is wanted, the answer is BLUR_PAD (no crop) or drawing inside the guide. (`lockAspect` stays in the source, unused, for reference.)
+
+**Bounds clamp**: `onDragEnd` clamps the box inside the source frame (size-preserving slide). Defense-in-depth: `renderer.py` `_clamp_kfs` (called in `render()` after `_probe_dims`) caps every keyframe box inside the frame — a no-op for valid boxes, but stops an off-frame box from a direct API/batch/auto-segment call from making ffmpeg's `crop` fail. Don't remove either layer.
 
 ### Drag interactions (resize / move / draw)
 On mousedown, `onDragStart` hit-tests the click point against the active box (at currentTime) in this order:
@@ -189,7 +195,12 @@ Don't remove this. If subs still break on Windows, the next step is wrapping in 
 ASS uses `&H00BBGGRR` (alpha, then BGR — reversed from RGB). `to_ass_color()` in `renderer.py` handles conversion. If adding new color params, route through it.
 
 ### Word grouping
-`_group_words()` chunks Whisper output into 1-3 word groups (max 18 chars). This is the "TikTok style" — short, snappy, fast. Don't change the default without owner approval. The function is intentionally simple (greedy); a smarter version would split on punctuation, but that's not a priority.
+`_group_words()` chunks Whisper output into 1-3 word groups (max 18 chars). This is the "TikTok style" — short, snappy, fast. Don't change the default without owner approval. The function is intentionally simple (greedy); a smarter version would split on punctuation, but that's not a priority. Each group now also carries `words: [{text,start,end}]` (per-word timing) — `_build_ass` needs this for the karaoke highlight.
+
+### Caption styling (TikTok karaoke + bundled fonts)
+Captions are burned via ASS (`_build_ass`). Two deliberate choices:
+- **Bundled fonts**: `assets/fonts/Anton-Regular.ttf` (default) + `BebasNeue-Regular.ttf` are OFL fonts shipped in-repo. The `subtitles=` filter gets `:fontsdir=<assets/fonts>` so libass uses them instead of a generic host fallback (the old cause of "plain-looking" captions). The Google Fonts `<link>` in `index.html` only affects the browser preview, NOT the burn — the burn uses fontsdir. Family names must match the ASS `Style:` Fontname exactly (`Anton`, `Bebas Neue`). Adding a font = drop the .ttf in `assets/fonts/`, add to `CAPTION_FONTS` (models.py) + the `<select>`, and check the family name via `fc-query --format='%{family}' file.ttf`.
+- **Per-word karaoke highlight**: instead of one Dialogue per group, `_build_ass` emits one Dialogue **per word time-slice**. In each slice all the group's words show, but the currently-spoken word is recolored to `CAPTION_HIGHLIGHT` (accent `#E8FF3A`) and scaled `\fscx/\fscy 112`, then reset to `CAPTION_FILL` white / 100%. Slices are contiguous (word j spans `[word[j].start, word[j+1].start)`, last → group end). The mild scale causes a tiny center-recenter "breathing" per word — intended pop, fine for 1-3 word groups. Style line uses Outline=6, Shadow=3 (fatter than before) for punch over any footage. Colors route through `to_ass_color()`.
 
 ### Whisper model
 Default is `"base"` — fast (~1x realtime on CPU), decent for English, **mediocre for Indonesian**. The model is cached via `@lru_cache(maxsize=1)`, so first transcribe is slow (model load + download on first run), subsequent are fast.
@@ -223,6 +234,8 @@ Flow (post-rework): Source → Position → **Render Final (with Caption)** — 
 5. **Resize handle on boxes** — corner handles to resize an existing box (keeping aspect locked).
 6. **Batch mode via config.json** — currently `config.json` is just a stub. Wire it up as a CLI mode: `python main.py --batch configs/*.json` that runs without UI.
 7. ~~Smooth keyframe interpolation~~ — **DONE** (2026-05). Linear interp between keyframes via per-frame ffmpeg `crop` expressions. Smoother curves (cubic/easing) is a future option if the linear pans feel mechanical.
+8. ~~Better caption fonts / styling~~ — **DONE** (2026-05). Bundled Anton (default) + Bebas Neue in `assets/fonts/`, libass pointed via `fontsdir=`, fat outline + TikTok-karaoke per-word highlight. See `ROADMAP.md` + "Caption styling" gotcha below. Remaining stretch (box bg / accent-fill / fades) is optional.
+9. **Auto-segment long video → clip list (LLM)** — segmentation (which moments to clip, with start/end/title/description) is currently done manually in Gemini web and pasted in. Build it into the tool: transcribe → LLM proposes segments grounded on the transcript → emit the `config.json` job schema. Pluggable provider (Gemini paid API **or** own vLLM/Qwen endpoint like `illustrator`). Ties into batch mode (#6). Full spec in `ROADMAP.md`.
 
 ## Things NOT to do
 

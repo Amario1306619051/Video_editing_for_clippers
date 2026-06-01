@@ -63,6 +63,8 @@ class TranscribeResponse(BaseModel):
 
 
 CAPTION_FONTS = [
+    "Anton",          # bundled (assets/fonts) — heavy display, TikTok default
+    "Bebas Neue",     # bundled — tall condensed
     "Bricolage Grotesque",
     "JetBrains Mono",
     "Inter",
@@ -79,7 +81,7 @@ class RenderRequest(BaseModel):
     box1: Optional[list[Keyframe]] = None
     box2: Optional[list[Keyframe]] = None
     words: list[Word] = Field(default_factory=list)
-    caption_font: str = "Bricolage Grotesque"
+    caption_font: str = "Anton"
     caption_size: int = 64
     cleanup: bool = False
     # Optional render sub-range (seconds from clip start). Lets the user trim
