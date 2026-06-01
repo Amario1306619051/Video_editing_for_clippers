@@ -167,6 +167,13 @@ The `eq=brightness=-0.08` is a slight darkening so the background reads as "back
 
 Fit mode is **per-keyframe**, not global or per-box. Each kf's `fit` applies for the segment starting at that kf (same semantics as `interp`). The frontend exposes a Cover/Blur Pad toggle button in each segment row of the Step 2 kf-list. New keyframes inherit `fit` from the nearest prior keyframe in the same box (cover if none exist yet).
 
+### crop w/h are INIT-LOCKED — animated-SIZE boxes need per-segment crops (bug fixed 2026-06)
+**Critical ffmpeg gotcha:** the `crop` filter evaluates `w`/`h` (the OUTPUT size) ONCE at init — only `x`/`y` animate per-frame. So a box whose **size changes between keyframes** (zoom) CANNOT be done with `crop=w='<expr>':h='<expr>'` — the size stays stuck at the init value (which, with `t` undefined at init, falls through the `if(lt(t,...))` chain to the LAST keyframe's value). This silently broke every zoom: the box rendered at the last keyframe's size for the whole clip. (`crop` in this ffmpeg build has no `eval=frame` option either.)
+
+Fix: `_crop_chain` detects when w/h varies across real keyframes (`size_varies`) and routes to **`_crop_chain_segmented`** — it crops each keyframe segment with a LITERAL (constant) box, applies that kf's fit (cover/blur), and composites the segments with `overlay=enable='between(t,t0,t1)'` switching (first segment extends back to t=0; gaps stay black via the base). The expression path (`_build_expr`) is now used ONLY for a single keyframe or **constant-size** multi-kf (where x/y still pan smoothly per-frame and constant w/h is fine).
+
+Consequence: **size is STEPPED across a zoom** (each segment shows its start-keyframe box; no smooth per-frame zoom — crop can't do per-frame w/h, and `zoompan` only does AR-locked zoom). HOLD (the default) is exactly right; LINEAR with a size change degrades to stepped. Don't revert to a single expression-crop for varying-size boxes — it's the bug. illustrator's renderer has the identical fix.
+
 **Mixed-fit pipeline.** When a box has only one fit value across all its kfs, the chain is the simple cover or blur_pad form above. When fits are mixed, `_crop_chain` emits both branches and switches between them per segment via `overlay=enable='<expr>'`:
 ```
 [in] crop, setsar=1, split=3 [s1][s2][s3]

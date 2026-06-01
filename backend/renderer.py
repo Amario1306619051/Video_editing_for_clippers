@@ -408,6 +408,64 @@ def _enable_from_intervals(intervals: list[tuple[float, float]]) -> str:
     return "+".join(f"between(t,{_fmt_num(t0)},{_fmt_num(t1)})" for t0, t1 in intervals)
 
 
+def _crop_chain_segmented(input_label: str, kfs: list[dict],
+                          out_w: int, out_h: int, out_label: str) -> list[str]:
+    """Render a box whose SIZE changes between keyframes.
+
+    ffmpeg's `crop` evaluates w/h ONCE at init (only x/y animate per-frame), so an
+    animated-SIZE box (zoom) can't be a single expression-crop — the size would
+    stay stuck at the init value. Instead we crop each segment with a LITERAL
+    (constant) box and composite the segments with `overlay=enable=` switching.
+    Per-keyframe fit (cover/blur_pad) and gap segments are handled here too.
+
+    Size is stepped per segment (no smooth interpolation across a zoom — crop
+    can't do per-frame w/h); position-only animation uses the expression path.
+    """
+    cover_filters = (
+        f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h}"
+    )
+    n = len(kfs)
+    real_idx = [i for i, k in enumerate(kfs) if not k["gap"]]
+    parts: list[str] = []
+    if not real_idx:  # all-gap → black slot (bounded by source length)
+        k = kfs[0]
+        parts.append(
+            f"[{input_label}]crop={int(k['w'])}:{int(k['h'])}:{int(k['x'])}:{int(k['y'])},"
+            f"{cover_filters},setsar=1,eq=brightness=-1.0:contrast=0[{out_label}]"
+        )
+        return parts
+
+    splits = [f"{out_label}_sp{j}" for j in range(len(real_idx))]
+    parts.append(f"[{input_label}]split={len(real_idx)}{''.join('[' + s + ']' for s in splits)}")
+
+    seg_info: list[tuple[str, float, float]] = []
+    for j, i in enumerate(real_idx):
+        k = kfs[i]
+        crop = f"crop={int(k['w'])}:{int(k['h'])}:{int(k['x'])}:{int(k['y'])}"
+        seg = f"{out_label}_seg{j}"
+        if k["fit"] == "blur_pad":
+            parts.append(f"[{splits[j]}]{crop},setsar=1,split=2[{seg}a][{seg}b]")
+            parts.append(f"[{seg}a]{cover_filters},gblur=sigma=30:steps=2,eq=brightness=-0.08[{seg}bg]")
+            parts.append(f"[{seg}b]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[{seg}fg]")
+            parts.append(f"[{seg}bg][{seg}fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{seg}]")
+        else:
+            parts.append(f"[{splits[j]}]{crop},{cover_filters},setsar=1[{seg}]")
+        # First keyframe extends back to t=0 (matches _build_expr "hold before first kf").
+        t0 = 0.0 if i == 0 else k["t"]
+        t1 = kfs[i + 1]["t"] if i + 1 < n else 1e9
+        seg_info.append((seg, t0, t1))
+
+    parts.append(f"color=c=black:s={out_w}x{out_h}:r=30[{out_label}_base]")
+    cur = f"{out_label}_base"
+    for idx, (seg, t0, t1) in enumerate(seg_info):
+        nxt = out_label if idx == len(seg_info) - 1 else f"{out_label}_ov{idx}"
+        parts.append(
+            f"[{cur}][{seg}]overlay=enable='between(t,{_fmt_num(t0)},{_fmt_num(t1)})':shortest=1[{nxt}]"
+        )
+        cur = nxt
+    return parts
+
+
 def _crop_chain(input_label: str, keyframes: list[Keyframe],
                 out_w: int, out_h: int, out_label: str) -> list[str]:
     """Build the filter chain(s) that turn a per-frame source crop into a
@@ -421,8 +479,22 @@ def _crop_chain(input_label: str, keyframes: list[Keyframe],
 
     `gap=True` keyframes mark empty segments — the slot renders as black for
     those segments via a final `color=black` overlay with `enable=`.
+
+    SIZE animation gotcha: ffmpeg's crop w/h are init-locked (only x/y animate).
+    So if the box changes SIZE between keyframes we route to
+    `_crop_chain_segmented` (literal per-segment crops). The expression path
+    below is only used for a single keyframe or for constant-SIZE multi-kf
+    (where x/y still pan smoothly per-frame and the constant w/h is fine).
     """
     kfs = _normalize_keyframes(keyframes)
+
+    # crop w/h can't animate per-frame → if the box SIZE varies across real
+    # keyframes, render per-segment with literal crops instead of expressions.
+    real = [k for k in kfs if not k["gap"]]
+    size_varies = len(kfs) > 1 and len({(round(k["w"], 1), round(k["h"], 1)) for k in real}) > 1
+    if size_varies:
+        return _crop_chain_segmented(input_label, kfs, out_w, out_h, out_label)
+
     if len(kfs) == 1:
         k = kfs[0]
         crop = f"crop={int(k['w'])}:{int(k['h'])}:{int(k['x'])}:{int(k['y'])}"
