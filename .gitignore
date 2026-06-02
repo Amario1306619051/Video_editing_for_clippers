@@ -6,6 +6,7 @@ output/
 *.srt
 
 # ---- Cookies / secrets (YouTube auth) ----
+.env
 cookies.txt
 *cookies*.txt
 *.netrc

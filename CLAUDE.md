@@ -209,10 +209,17 @@ Captions are burned via ASS (`_build_ass`). Two deliberate choices:
 - **Bundled fonts**: `assets/fonts/Anton-Regular.ttf` (default) + `BebasNeue-Regular.ttf` are OFL fonts shipped in-repo. The `subtitles=` filter gets `:fontsdir=<assets/fonts>` so libass uses them instead of a generic host fallback (the old cause of "plain-looking" captions). The Google Fonts `<link>` in `index.html` only affects the browser preview, NOT the burn — the burn uses fontsdir. Family names must match the ASS `Style:` Fontname exactly (`Anton`, `Bebas Neue`). Adding a font = drop the .ttf in `assets/fonts/`, add to `CAPTION_FONTS` (models.py) + the `<select>`, and check the family name via `fc-query --format='%{family}' file.ttf`.
 - **Per-word karaoke highlight**: instead of one Dialogue per group, `_build_ass` emits one Dialogue **per word time-slice**. In each slice all the group's words show, but the currently-spoken word is recolored to `CAPTION_HIGHLIGHT` (accent `#E8FF3A`) and scaled `\fscx/\fscy 112`, then reset to `CAPTION_FILL` white / 100%. Slices are contiguous (word j spans `[word[j].start, word[j+1].start)`, last → group end). The mild scale causes a tiny center-recenter "breathing" per word — intended pop, fine for 1-3 word groups. Style line uses Outline=6, Shadow=3 (fatter than before) for punch over any footage. Colors route through `to_ass_color()`.
 
-### Whisper model
-Default is `"base"` — fast (~1x realtime on CPU), decent for English, **mediocre for Indonesian**. The model is cached via `@lru_cache(maxsize=1)`, so first transcribe is slow (model load + download on first run), subsequent are fast.
+### Whisper model / GPU (updated 2026-06)
+`transcriber.py` auto-runs on **CUDA** when `torch.cuda.is_available()`, else CPU. Defaults: **`medium` on GPU, `base` on CPU** — `base` is mediocre for Indonesian, `medium` is much better and fits a 6 GB GPU (~4.3 GB). Knobs are env-driven (read from project-root `.env` by transcriber's own `_load_dotenv()`, or the process env):
+- `WHISPER_MODEL` — `tiny|base|small|medium|large-v3` (override the default).
+- `WHISPER_LANGUAGE` — e.g. `id`; empty = auto-detect. **`clipper/.env` sets `id`** (owner content is Indonesian). Forcing the language avoids auto-detect misfires on intro music / mixed audio.
 
-If owner asks for better Indonesian: change `get_model("base")` → `get_model("small")` or `medium`. Don't auto-detect; let owner choose.
+Other accuracy/robustness choices in `transcribe()`:
+- `condition_on_previous_text=False` — stops Whisper's repeat/hallucination loops over music/silence (intended trade-off; slight cross-window coherence loss on long speech).
+- `initial_prompt` param — optional vocab bias (proper nouns/topic) to cut mis-spellings.
+- **No persistent model cache**: the model is loaded per call and its **VRAM is freed afterwards** (`del` + `torch.cuda.empty_cache()`), so the NVENC render step gets the whole GPU back. Cost: each transcribe reloads (~few s from the on-disk `~/.cache/whisper` model). A CUDA OOM transparently **retries on CPU**.
+
+**GPU gotcha (the big one):** the installed `torch` build must match the NVIDIA driver's CUDA version, or `torch.cuda.is_available()` is silently `False` → Whisper runs on CPU (a bigger model is then painfully slow). Driver here supports CUDA 12.8, so torch must be a `cu12x` build. `requirements.txt` pins `torch==2.11.0+cu128` (+ the cu128 index) for exactly this reason — a plain install pulled a `cu13` build that couldn't see the GPU.
 
 ### No state persistence
 Restarting the server loses all in-flight jobs. `temp/` survives, but the frontend forgets its `job_id`. This is intentional — single-user local tool, no need for Redis/SQLite. Don't add persistence without asking.
@@ -296,7 +303,7 @@ When tests are eventually added, put them in `backend/tests/` using pytest. Fron
 | Caption font defaults / list             | `backend/models.py` + `frontend/index.html` `<select>` |
 | Caption position formula                 | `backend/renderer.py` `render()`, `caption_y` |
 | Word grouping rules (chunk size, chars)  | `backend/renderer.py` `_group_words()` |
-| Whisper model size                       | `backend/transcriber.py` `get_model()` default |
+| Whisper model size / language            | `WHISPER_MODEL` / `WHISPER_LANGUAGE` env (`.env`); defaults in `backend/transcriber.py` |
 | Aspect ratios for boxes                  | `frontend/app.js` `ASPECT_TOP/BOTTOM` |
 | Step UI / panels                         | `frontend/index.html` + `showStep()` in `app.js` |
 | Theme colors                             | `frontend/style.css` `:root` vars |

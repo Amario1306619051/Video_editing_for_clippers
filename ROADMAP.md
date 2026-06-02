@@ -164,7 +164,11 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 
 ## Transcription accuracy (Whisper) — "voicenya kurang akurat"
 
-**Status:** planned (shared issue dengan illustrator — `transcriber.py` identik)
+**Status:** ✅ sebagian besar DONE 2026-06 (shared dengan illustrator — `transcriber.py` identik).
+Dikerjain: GPU auto (torch di-fix ke `cu128`), default model **medium** di GPU, `WHISPER_LANGUAGE=id`
+(via `clipper/.env`), `condition_on_previous_text=False`, VRAM dibebasin abis transcribe + fallback CPU
+pas OOM. **Sisa (stretch):** `large-v3`/faster-whisper buat akurasi maksimal, dan `initial_prompt`
+dari title/description (param-nya udah ada, tinggal di-plumb ke `/api/transcribe`).
 
 **Why**
 
