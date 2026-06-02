@@ -147,3 +147,15 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 - Background task mechanism: FastAPI `BackgroundTasks` vs. a thread vs. `asyncio.create_subprocess_exec` for ffmpeg so the event loop can read progress without blocking.
 - Whisper transcribe progress is hard to surface granularly — accept an indeterminate phase, or estimate from audio duration?
 - Concurrency: in-memory progress map assumes one render per `job_id` at a time — fine for single-user local tool, but document it.
+
+---
+
+## Thumbnail generator (cover image for the clip) — enhancement
+
+**Status:** planned · GitHub issue #5
+
+**Why:** clippers need a thumbnail/cover to post the clip; today it's made in a separate tool.
+
+**Proposed:** a "Generate Thumbnail" button → cover IMAGE: pick/auto-suggest a frame, bold title text (bundled Anton/Bebas Neue + fat stroke, separate from burned captions), aspect options (16:9 / 9:16 / 1:1), export PNG/JPG to `output/`. Optional candidate thumbnails to pick from; stretch = subject cutout.
+
+**Notes:** new `POST /api/thumbnail` → ffmpeg single-frame (`-ss t -frames:v 1` + ASS/drawtext + scale/pad). ffmpeg-only, no heavy deps. Reuse `assets/fonts/`, `to_ass_color()`. Distinct from #2 (text overlay on first 1-3s of the VIDEO) — this is a standalone image.
