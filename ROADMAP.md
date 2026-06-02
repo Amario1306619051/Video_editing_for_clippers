@@ -159,3 +159,55 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 **Proposed:** a "Generate Thumbnail" button → cover IMAGE: pick/auto-suggest a frame, bold title text (bundled Anton/Bebas Neue + fat stroke, separate from burned captions), aspect options (16:9 / 9:16 / 1:1), export PNG/JPG to `output/`. Optional candidate thumbnails to pick from; stretch = subject cutout.
 
 **Notes:** new `POST /api/thumbnail` → ffmpeg single-frame (`-ss t -frames:v 1` + ASS/drawtext + scale/pad). ffmpeg-only, no heavy deps. Reuse `assets/fonts/`, `to_ass_color()`. Distinct from #2 (text overlay on first 1-3s of the VIDEO) — this is a standalone image.
+
+---
+
+## Transcription accuracy (Whisper) — "voicenya kurang akurat"
+
+**Status:** planned (shared issue dengan illustrator — `transcriber.py` identik)
+
+**Why**
+
+Whisper sering salah dengar, terutama **bahasa Indonesia** + **nama/istilah khusus** (nama
+orang, tempat, istilah agama/teknis). Caption jadi salah kata, dan karena per-word timing
+dipakai buat karaoke highlight (`_group_words`/`_build_ass`), salah kata = highlight meleset
+juga. Roadmap #4 ("Edit transcript") cuma nambal **manual setelah** salah; issue ini soal bikin
+transkripsinya lebih bener **dari awal**. (Lihat juga gotcha "Whisper model" di CLAUDE.md.)
+
+**Root cause** (`backend/transcriber.py`)
+
+1. Model **hardcoded `base`** — tier terkecil yang useful, paling lemah buat non-English.
+2. **Tanpa `language` hint** — `model.transcribe()` auto-detect; gampang meleset / code-switch
+   di konten ID.
+3. **Tanpa `initial_prompt`** — nama diri / istilah domain gak ke-bias → sering salah eja.
+4. **Gak bisa diatur via env** — ganti model = edit kode.
+5. `condition_on_previous_text=True` (default) — bisa repetition/halusinasi pas musik/hening.
+
+**Proposed**
+
+- `WHISPER_MODEL` env (default naikin ke `small`/`medium`; `large-v3` kalau ada GPU).
+- `WHISPER_LANGUAGE` env (mis. `id`) → `transcribe(language=...)`, dengan override.
+- `initial_prompt` opsional buat nge-bias kosakata (dari title/description) → nama diri & istilah
+  konsisten.
+- Set `condition_on_previous_text=False` (atau expose) buat ngurangin loop/halusinasi.
+- **(Stretch, butuh approval)** swap ke `faster-whisper` (CTranslate2): jauh lebih cepat +
+  akurat + VAD bawaan. Ini **ganti tech / dep baru** → approval owner dulu (lihat "Things NOT to do").
+
+**Implementation notes**
+
+- `transcriber.py` **identik di clipper & illustrator** → ubah sekali, mirror ke satu lagi.
+- `get_model` di-`lru_cache` by name — aman buat swap ukuran model.
+- Model lebih gede = lebih lambat di CPU → nyambung ke open question GPU/latency di issue
+  Auto-segment.
+
+**Open questions**
+
+- Default model tier vs latency CPU — naikin default atau biarin owner yang pilih (sesuai gotcha
+  "Whisper model": *"Don't auto-detect; let owner choose"*)?
+- faster-whisper = dep baru (CTranslate2) — approve?
+- Language: fix ke `id` atau tetap auto-detect dengan override?
+
+**Acceptance**
+
+- Speech ID + nama diri ke-transcribe cukup bener sampai caption kebaca benar & per-word timing
+  tetap nyambung; minim kata ngawur / repetisi.
