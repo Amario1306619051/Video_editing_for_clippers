@@ -4,9 +4,9 @@ This file is the project context for Claude Code. Read it fully before touching 
 
 ## Project: CLIPPER
 
-Tool buat bikin video vertikal 9:16 (TikTok / Shorts / Reels) dari YouTube. User input URL + range waktu, draw 2 crop box di video sumber, tool auto-transcribe pakai Whisper, lalu render final video dengan caption word-by-word ala TikTok.
+A tool for making 9:16 vertical videos (TikTok / Shorts / Reels) from YouTube. The user inputs a URL + time range, draws 2 crop boxes on the source video, the tool auto-transcribes with Whisper, then renders the final video with word-by-word TikTok-style captions.
 
-**Language**: Codebase pakai English. Komentar UI & dokumentasi user-facing pakai bahasa Indonesia campur English (sesuai gaya owner). Jangan terjemahin string UI yang udah ada ke full English.
+**Language**: English everywhere. The codebase, code comments, user-facing docs, AND UI strings are all in English. The project standardized on English across the board — translate any remaining Indonesian strings to English when you encounter them.
 
 ## Architecture
 
@@ -76,7 +76,7 @@ clipper/
 ├── output/              Final renders. Kept.
 ├── config.json          Stub template (not wired up yet — see Roadmap)
 ├── requirements.txt
-└── README.md            User-facing setup guide (Indonesian)
+└── README.md            User-facing setup guide
 ```
 
 ## API contract
@@ -137,7 +137,7 @@ Cursor changes per mode on hover (`nwse-resize`/`nesw-resize` on handles, `move`
 Below the box-controls is a per-box keyframe summary panel (`#kf-list`) showing each segment as a row: `[time → next-time] [WxH @ (x,y)] [HOLD/PAN→/—] [seek][toggle][delete]`. The row containing the current scrubber time gets `.current` highlight. This panel is the canonical "where is bbox X used" answer — the timeline above is the same info as dots, but this list spells out each segment's actual bbox so the user can audit it without inspecting individual kfs.
 
 ### Video controls & draw arming
-The video uses a **custom control bar** (play/pause/scrubber/timestamp), NOT native HTML5 `<video controls>`. The native controls don't blend with the dark editorial theme and got covered by the canvas overlay; the user asked for "selayaknya UI" — proper UI. The control bar sits *below* the source stage, so it's always reachable.
+The video uses a **custom control bar** (play/pause/scrubber/timestamp), NOT native HTML5 `<video controls>`. The native controls don't blend with the dark editorial theme and got covered by the canvas overlay; the user asked for a proper UI. The control bar sits *below* the source stage, so it's always reachable.
 
 The canvas overlay is "armed" via `state.activeBox`:
 - `activeBox === null` (default) → canvas has `pointer-events: none`. The video underneath is interactable for nothing in particular (custom controls below handle playback), but the user can scrub via the bar without accidentally drawing.
@@ -258,7 +258,7 @@ Flow (post-rework): Source → Position → **Render Final (with Caption)** — 
 - ❌ Don't add user auth, accounts, or multi-tenancy. Single-user local tool.
 - ❌ Don't add a database. Filesystem-as-state is fine.
 - ❌ Don't change aspect ratios. Owner picked 3/8 + 5/8 deliberately.
-- ❌ Don't auto-translate UI strings to English.
+- ❌ Don't leave UI strings in Indonesian — the project is English everywhere now, so all UI text should be in English.
 - ❌ Don't add emoji to UI elements unless owner explicitly asks.
 - ❌ Don't `pip install` new heavy deps (PyTorch alternatives, transformers, etc.) without asking. Whisper already pulls torch.
 - ❌ Don't hide ffmpeg stderr on errors — current code surfaces it in HTTPException detail. Keep that.
@@ -290,7 +290,7 @@ When tests are eventually added, put them in `backend/tests/` using pytest. Fron
 
 ## When the owner asks for changes
 
-- Owner is in Indonesia, communicates in mixed ID/EN. Match their register — casual, direct, no corporate speak.
+- The owner is based in Indonesia and communicates in English. Match their register — casual, direct, no corporate speak.
 - They prefer being asked clarifying questions **before** big architectural changes, not after.
 - Show small diffs, not full file rewrites, when a single function changes.
 - Don't pad responses with disclaimers or "let me know if..." — they read fast.

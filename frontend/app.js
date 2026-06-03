@@ -417,18 +417,18 @@ function currentFit(n) {
 function toggleInterpAtCurrent() {
   const n = state.activeBox;
   if (n === null) {
-    setStatus('tr-status', 'Pilih Box dulu (klik pill 1 atau 2)', 'err');
+    setStatus('tr-status', 'Pick a Box first (click pill 1 or 2)', 'err');
     return;
   }
   const i = findKeyframeAt(n, state.currentTime);
   if (i < 0) {
-    setStatus('tr-status', `No keyframe @${state.currentTime.toFixed(2)}s — drag dulu buat bikin kf`, 'err');
+    setStatus('tr-status', `No keyframe @${state.currentTime.toFixed(2)}s — drag first to create a kf`, 'err');
     return;
   }
   const cur = state.keyframes[n][i];
   cur.interp = (cur.interp || 'hold') === 'hold' ? 'linear' : 'hold';
   setStatus('tr-status',
-    `Box ${n} kf @${cur.t.toFixed(2)}s → ${cur.interp === 'linear' ? 'LINEAR (smooth pan ke kf berikutnya)' : 'HOLD (diam sampai kf berikutnya)'}`,
+    `Box ${n} kf @${cur.t.toFixed(2)}s → ${cur.interp === 'linear' ? 'LINEAR (smooth pan to the next kf)' : 'HOLD (stays put until the next kf)'}`,
     'ok');
   renderTimeline();
   redrawOverlay();
@@ -446,19 +446,19 @@ function findKeyframeAt(n, t) {
 function deleteKeyframeAtCurrent() {
   const n = state.activeBox;
   if (n === null) {
-    setStatus('tr-status', 'Pilih Box dulu (klik pill 1/2) sebelum delete', 'err');
+    setStatus('tr-status', 'Pick a Box first (click pill 1/2) before deleting', 'err');
     return;
   }
   const i = findKeyframeAt(n, state.currentTime);
   if (i < 0) {
     setStatus('tr-status',
-      `No keyframe pas di ${state.currentTime.toFixed(2)}s untuk Box ${n}. Tip: klik dot di timeline atau ▶ di segment list buat seek ke kf, baru tekan Delete`,
+      `No keyframe exactly at ${state.currentTime.toFixed(2)}s for Box ${n}. Tip: click a dot on the timeline or ▶ in the segment list to seek to a kf, then press Delete`,
       'err');
     return;
   }
   state.keyframes[n].splice(i, 1);
   setStatus('tr-status',
-    `Deleted kf Box ${n} @${state.currentTime.toFixed(2)}s · sisa ${state.keyframes[n].length} kf`,
+    `Deleted kf Box ${n} @${state.currentTime.toFixed(2)}s · ${state.keyframes[n].length} kf remaining`,
     'ok');
   renderTimeline();
   redrawOverlay();
@@ -468,12 +468,12 @@ function deleteKeyframeAtCurrent() {
 function clearActiveBox() {
   const n = state.activeBox;
   if (n === null) {
-    setStatus('tr-status', 'Pilih Box dulu sebelum clear', 'err');
+    setStatus('tr-status', 'Pick a Box first before clearing', 'err');
     return;
   }
   const count = state.keyframes[n].length;
   if (!count) {
-    setStatus('tr-status', `Box ${n} udah kosong`, 'err');
+    setStatus('tr-status', `Box ${n} is already empty`, 'err');
     return;
   }
   state.keyframes[n] = [];
@@ -549,12 +549,12 @@ function renderKfList() {
         <span class="dot dot-${n}"></span>
         <span>Box ${n} segments</span>
         <span class="kf-count" style="margin-left:auto">${kfs.length} kf</span>
-        ${kfs.length ? `<button class="clear-all-btn danger" data-act="clear-all" data-box="${n}" title="Hapus semua kf Box ${n}">Clear all ×</button>` : ''}
+        ${kfs.length ? `<button class="clear-all-btn danger" data-act="clear-all" data-box="${n}" title="Clear all kfs in Box ${n}">Clear all ×</button>` : ''}
       `;
     }
 
     if (!kfs.length) {
-      ol.innerHTML = '<li class="empty">No keyframes — pilih box ini, drag di video</li>';
+      ol.innerHTML = '<li class="empty">No keyframes — pick this box, drag on the video</li>';
       continue;
     }
     const dur = state.source ? state.source.duration : null;
@@ -576,7 +576,7 @@ function renderKfList() {
             <span class="kf-seg-time">${formatTime(kf.t)} → ${isLast ? 'end' : formatTime(endT)}</span>
             <span class="kf-seg-dims kf-seg-empty">— empty (rendered black) —</span>
             <span class="kf-seg-actions">
-              <button data-act="seek" data-box="${n}" data-idx="${idx}" title="Seek ke awal gap">▶ seek</button>
+              <button data-act="seek" data-box="${n}" data-idx="${idx}" title="Seek to the start of the gap">▶ seek</button>
               <button data-act="del"  data-box="${n}" data-idx="${idx}" class="danger" title="Delete gap marker → restore prior kf's extension">× restore</button>
             </span>
           </li>
@@ -588,10 +588,10 @@ function renderKfList() {
           <span class="kf-seg-dims">${Math.round(kf.w)}×${Math.round(kf.h)} @(${Math.round(kf.x)},${Math.round(kf.y)})</span>
           <span class="kf-seg-mode ${cls}">${tag}</span>
           <span class="kf-seg-actions">
-            <button data-act="seek"       data-box="${n}" data-idx="${idx}" title="Seek ke kf ini">▶ seek</button>
+            <button data-act="seek"       data-box="${n}" data-idx="${idx}" title="Seek to this kf">▶ seek</button>
             <button data-act="toggle"     data-box="${n}" data-idx="${idx}" title="Toggle Hold ↔ Linear (interp)">⇄ ${mode}</button>
-            <button data-act="toggle-fit" data-box="${n}" data-idx="${idx}" class="kf-seg-fit ${fit}" title="Toggle Cover ↔ Blur Pad (fit mode) untuk segment ini">${fitLbl}</button>
-            <button data-act="del"        data-box="${n}" data-idx="${idx}" class="danger" title="Delete kf ini">× delete</button>
+            <button data-act="toggle-fit" data-box="${n}" data-idx="${idx}" class="kf-seg-fit ${fit}" title="Toggle Cover ↔ Blur Pad (fit mode) for this segment">${fitLbl}</button>
+            <button data-act="del"        data-box="${n}" data-idx="${idx}" class="danger" title="Delete this kf">× delete</button>
           </span>
         </li>
       `;
@@ -607,7 +607,7 @@ function onKfListClick(e) {
   // "clear-all" action doesn't have idx
   if (act === 'clear-all') {
     const count = state.keyframes[n].length;
-    if (!count) { setStatus('tr-status', `Box ${n} udah kosong`, 'err'); return; }
+    if (!count) { setStatus('tr-status', `Box ${n} is already empty`, 'err'); return; }
     state.keyframes[n] = [];
     setStatus('tr-status', `Box ${n} cleared (removed ${count} kf)`, 'ok');
     renderTimeline();
@@ -636,7 +636,7 @@ function onKfListClick(e) {
   } else if (act === 'del') {
     state.keyframes[n].splice(idx, 1);
     setStatus('tr-status',
-      `Deleted kf Box ${n} @${kf.t.toFixed(2)}s · sisa ${state.keyframes[n].length} kf`, 'ok');
+      `Deleted kf Box ${n} @${kf.t.toFixed(2)}s · ${state.keyframes[n].length} kf remaining`, 'ok');
     renderTimeline();
     redrawOverlay();
     redrawPreviews();
@@ -729,7 +729,7 @@ function findHandle(box, srcPos) {
 function trimBoxFromNow(n) {
   const kfs = state.keyframes[n];
   if (!kfs.length) {
-    setStatus('tr-status', `Box ${n} udah kosong`, 'err');
+    setStatus('tr-status', `Box ${n} is already empty`, 'err');
     return;
   }
   const t = state.currentTime;
@@ -751,7 +751,7 @@ function trimBoxFromNow(n) {
       gap: true,
     });
     state.keyframes[n] = kept;
-    setStatus('tr-status', `Box ${n} trimmed @${t.toFixed(2)}s · earlier kfs kept, from here onwards empty`, 'ok');
+    setStatus('tr-status', `Box ${n} trimmed @${t.toFixed(2)}s · earlier kfs kept, empty from here onwards`, 'ok');
   }
   renderTimeline();
   redrawOverlay();
@@ -865,7 +865,7 @@ function onDragEnd(e) {
     // Click in empty area = inherit size from nearest kf, place at click pos
     const ref = nearestKeyframe(n, t);
     if (!ref) {
-      setStatus('tr-status', `Box ${n} belum ada kf — drag (jangan cuma klik) buat set size pertama`, 'err');
+      setStatus('tr-status', `Box ${n} has no kf yet — drag (don't just click) to set the first size`, 'err');
       redrawOverlay();
       return;
     }
@@ -1127,7 +1127,7 @@ function redrawPreview(canvas) {
     const c = (b1 ? 1 : 0) + (b2 ? 1 : 0);
     const kf = `${state.keyframes[1].length}+${state.keyframes[2].length} keyframes`;
     els.previewMeta.textContent = c === 0
-      ? 'Belum ada box'
+      ? 'No box yet'
       : c === 1 ? `1 box · full 1080×1920 focus · ${kf}` : `2 boxes · vstack 3/8+5/8 · ${kf}`;
   }
 }
@@ -1237,7 +1237,7 @@ async function doDownload() {
 function doContinue() {
   if (!state.jobId) return;
   if (!hasAnyKeyframes()) {
-    setStatus('tr-status', 'Gambar minimal 1 box dulu (set keyframe)', 'err');
+    setStatus('tr-status', 'Draw at least 1 box first (set a keyframe)', 'err');
     return;
   }
   setStatus('tr-status', '', null);
@@ -1246,7 +1246,7 @@ function doContinue() {
 
 function renderWordChips() {
   if (!state.words.length) {
-    els.wordsBox.innerHTML = '<div class="muted">Belum ada transcript.</div>';
+    els.wordsBox.innerHTML = '<div class="muted">No transcript yet.</div>';
     return;
   }
   els.wordsBox.innerHTML = state.words
@@ -1287,7 +1287,7 @@ function fillResult(result, withCaption) {
   const descEl = $('#result-card-desc');
   if (descEl) {
     descEl.textContent = withCaption
-      ? `Caption di-burn. File: ${result.filename}`
+      ? `Caption burned in. File: ${result.filename}`
       : `No caption (quick preview). File: ${result.filename}`;
   }
 }
@@ -1409,7 +1409,7 @@ async function doRender() {
   btn.disabled = true; if (btn2) btn2.disabled = true;
   try {
     if (!state.words.length) {
-      setStatus('rd-status', 'Transcribing audio (Whisper · first run lambat, model di-download sekali)…');
+      setStatus('rd-status', 'Transcribing audio (Whisper · first run is slow, the model downloads once)…');
       const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
       state.words = tr.words;
       els.wordsBox.classList.remove('hidden');
@@ -1445,7 +1445,7 @@ async function doDone() {
   btn.disabled = true;
   try {
     await apiPost('/api/cleanup', { job_id: state.jobId });
-    setStatus('rd-status', 'Source cleaned. Output tetep ada di folder output/.', 'ok');
+    setStatus('rd-status', 'Source cleaned. The output stays in the output/ folder.', 'ok');
     $('#btn-render').disabled = true;
     const nc = $('#btn-render-nocap'); if (nc) nc.disabled = true;
   } catch (e) {

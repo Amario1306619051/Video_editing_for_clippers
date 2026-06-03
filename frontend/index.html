@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -28,7 +28,7 @@
   <section class="panel" id="panel-1">
     <div class="panel-head">
       <h1>Source</h1>
-      <p>Tarik clip dari YouTube. Tentukan range waktunya.</p>
+      <p>Pull a clip from YouTube. Set the time range.</p>
     </div>
 
     <div class="form-grid">
@@ -48,12 +48,12 @@
       </label>
 
       <label>
-        <span>End (HH:MM:SS) — kosongin = sampe abis</span>
+        <span>End (HH:MM:SS) — leave empty = to the end</span>
         <input type="text" id="f-end" placeholder="00:00:30">
       </label>
 
       <label class="full">
-        <span>Description (opsional)</span>
+        <span>Description (optional)</span>
         <textarea id="f-desc" rows="2"></textarea>
       </label>
     </div>
@@ -68,7 +68,7 @@
   <section class="panel hidden" id="panel-2">
     <div class="panel-head">
       <h1>Position</h1>
-      <p>Scrub video ke waktu tertentu → pilih box (1/2) → drag = set keyframe di waktu itu. Render bakal interpolasi linear antar keyframe.</p>
+      <p>Scrub the video to a specific time → pick a box (1/2) → drag = set a keyframe at that time. The render will interpolate linearly between keyframes.</p>
     </div>
 
     <div class="position-layout">
@@ -104,31 +104,31 @@
             <span class="dot dot-1"></span>
             <span>Box 1 · TOP slot (3/8, 3:2)</span>
             <span class="kf-count" id="kf-count-1">0 kf</span>
-            <button data-clear="1" title="hapus semua keyframe">×</button>
+            <button data-clear="1" title="clear all keyframes">×</button>
           </div>
           <div class="box-pill" id="pill-2">
             <span class="dot dot-2"></span>
             <span>Box 2 · BOTTOM slot (5/8, 9:10)</span>
             <span class="kf-count" id="kf-count-2">0 kf</span>
-            <button data-clear="2" title="hapus semua keyframe">×</button>
+            <button data-clear="2" title="clear all keyframes">×</button>
           </div>
         </div>
 
         <div class="kf-controls">
-          <button id="btn-kf-toggle-interp">Toggle interp kf ini (Hold ↔ Linear)</button>
-          <button id="btn-kf-delete">Delete keyframe di waktu ini</button>
+          <button id="btn-kf-toggle-interp">Toggle interp on this kf (Hold ↔ Linear)</button>
+          <button id="btn-kf-delete">Delete keyframe at this time</button>
           <span class="hint">
-            Pilih Box (pill / <kbd>1</kbd>/<kbd>2</kbd>) → di area video:
+            Pick a Box (pill / <kbd>1</kbd>/<kbd>2</kbd>) → in the video area:
             <br>
-            • <b>Drag corner handle</b> (kotak putih) = resize · <b>drag dalem box</b> = geser · <b>drag di luar</b> = bikin box baru
+            • <b>Drag a corner handle</b> (white square) = resize · <b>drag inside the box</b> = move · <b>drag outside</b> = create a new box
             <br>
-            • Box <b>bebas ukuran</b>. Garis putih putus-putus = <b>area yang ke-render</b> (mode COVER); bagian yang di-dim bakal kepotong. Mau seluruh box keliatan tanpa kepotong? pakai <b>BLUR</b> di segment row.
+            • Boxes are <b>any size</b>. The dashed white line = <b>the rendered area</b> (COVER mode); the dimmed part gets cropped. Want the whole box visible without cropping? Use <b>BLUR</b> in the segment row.
             <br>
-            • <b>Klik aja</b> di luar = reposisi pake size dari kf terdekat
+            • <b>Just click</b> outside = reposition using the size of the nearest kf
             <br>
-            • <b>Delete</b> kf: pencet <kbd>D</kbd> atau <kbd>Del</kbd> (di waktu kf) · <kbd>Shift</kbd>+<kbd>X</kbd> = clear seluruh box aktif · atau klik tombol di segment list di bawah
+            • <b>Delete</b> a kf: press <kbd>D</kbd> or <kbd>Del</kbd> (at the kf's time) · <kbd>Shift</kbd>+<kbd>X</kbd> = clear the entire active box · or click the button in the segment list below
             <br>
-            Default kf = <b>HOLD</b> + <b>COVER</b>. Toggle di segment row buat ganti per-scene: HOLD↔LINEAR (smooth pan) / COVER↔BLUR (fit mode). · t = <span id="cur-time">0.00s</span>
+            Default kf = <b>HOLD</b> + <b>COVER</b>. Toggle in the segment row to change per scene: HOLD↔LINEAR (smooth pan) / COVER↔BLUR (fit mode). · t = <span id="cur-time">0.00s</span>
           </span>
         </div>
 
@@ -162,7 +162,7 @@
   <section class="panel hidden" id="panel-3">
     <div class="panel-head">
       <h1>Render</h1>
-      <p>Render = compose 9:16 + transcribe (Whisper) + burn caption. Satu klik, dapet output final.</p>
+      <p>Render = compose 9:16 + transcribe (Whisper) + burn caption. One click gets you the final output.</p>
     </div>
 
     <div class="render-layout">
@@ -174,13 +174,13 @@
           </div>
           <div class="range-row">
             <input type="number" id="rd-start" placeholder="0" step="0.1" min="0">
-            <button type="button" class="ghost small" id="rd-start-from-cur" title="ambil dari scrubber Step 2">⟵ from cur</button>
+            <button type="button" class="ghost small" id="rd-start-from-cur" title="take from the Step 2 scrubber">⟵ from cur</button>
             <span class="range-sep">→</span>
             <input type="number" id="rd-end" placeholder="end" step="0.1" min="0">
-            <button type="button" class="ghost small" id="rd-end-from-cur" title="ambil dari scrubber Step 2">⟵ from cur</button>
+            <button type="button" class="ghost small" id="rd-end-from-cur" title="take from the Step 2 scrubber">⟵ from cur</button>
             <button type="button" class="ghost small" id="rd-clear" title="reset = full clip">×</button>
           </div>
-          <div class="hint">Kosongin = full clip. Sub-range bisa di-set walaupun download udah ke-trim — biar ga perlu re-download.</div>
+          <div class="hint">Leave empty = full clip. A sub-range can be set even if the download was already trimmed — so you don't have to re-download.</div>
         </div>
 
         <div class="caption-controls">
@@ -203,7 +203,7 @@
         </div>
 
         <div class="words-box hidden" id="words-box">
-          <div class="muted">Belum ada transcript.</div>
+          <div class="muted">No transcript yet.</div>
         </div>
       </div>
 
@@ -216,12 +216,12 @@
     <div class="actions">
       <button class="ghost" data-go="2">← Back</button>
       <button id="btn-render" class="primary">Render Final (with Caption) →</button>
-      <button id="btn-render-nocap" class="ghost" title="skip Whisper, preview cepat">Quick preview (no caption)</button>
+      <button id="btn-render-nocap" class="ghost" title="skip Whisper, fast preview">Quick preview (no caption)</button>
       <span class="status" id="rd-status"></span>
     </div>
 
     <div class="render-result hidden" id="render-result">
-      <h2 id="result-title">Render selesai.</h2>
+      <h2 id="result-title">Render complete.</h2>
       <div class="result-single">
         <div class="result-card" id="result-card">
           <div class="result-card-head">
@@ -229,12 +229,12 @@
             <a class="result-dl" href="#" download>↓ .mp4</a>
           </div>
           <video controls playsinline></video>
-          <p class="result-card-desc" id="result-card-desc">Per-box fit mode di-apply sesuai pilihan lo di Step 2.</p>
+          <p class="result-card-desc" id="result-card-desc">Per-box fit mode applied according to your choices in Step 2.</p>
         </div>
       </div>
       <div class="result-actions">
         <button id="btn-done" class="ghost">Done · clean up source</button>
-        <span class="hint">Mau coba combo lain? Balik ke Step 2, toggle fit di tiap segment row, render lagi. File output di <code>output/</code> bakal ke-overwrite tiap render — rename manual kalo mau keep.</span>
+        <span class="hint">Want to try another combo? Go back to Step 2, toggle the fit in each segment row, and render again. The output file in <code>output/</code> gets overwritten on every render — rename it manually if you want to keep it.</span>
       </div>
     </div>
   </section>

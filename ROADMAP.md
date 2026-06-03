@@ -77,12 +77,12 @@ The output captions look very plain / generic — not the punchy TikTok-style lo
 
 **Current behavior**
 
-Picking *which* moments to clip out of a long video is done **manually, outside the tool**. The owner currently pastes the YouTube URL into Gemini (web, free tier) with a prompt like *"clip semua reaksi video"* and asks for output in this format:
+Picking *which* moments to clip out of a long video is done **manually, outside the tool**. The owner currently pastes the YouTube URL into Gemini (web, free tier) with a prompt like *"clip all the reaction segments"* and asks for output in this format:
 
 ```json
 [
-  {"start": "00:05:08", "end": "00:06:03", "description": "Qorygore merespons opini Menteri PPPA...", "title": "Kerasnya Hidup Cowok / Solusi Gerbong Kereta"},
-  {"start": "00:06:03", "end": "00:06:48", "description": "Reaksi video komedi gombalan...", "title": "Pick Up Paling Haram / Gombalan Sukma"},
+  {"start": "00:05:08", "end": "00:06:03", "description": "Reacting to the minister's opinion...", "title": "The Hard Life of Guys / Train Carriage Fix"},
+  {"start": "00:06:03", "end": "00:06:48", "description": "Reacting to a comedy pickup-line video...", "title": "Worst Pickup Lines Ever"},
   ...
 ]
 ```
@@ -97,10 +97,10 @@ Then each segment is fed into clipper one at a time (or would be, via batch `con
 
 **Proposed**
 
-Build segmentation **into** clipper as a step before Position: input URL (+ optional instruction like "clip semua reaksi"), get back a list of `{start, end, title, description}` segments the user can review/edit, then each becomes a clip job.
+Build segmentation **into** clipper as a step before Position: input URL (+ optional instruction like "clip all the reaction segments"), get back a list of `{start, end, title, description}` segments the user can review/edit, then each becomes a clip job.
 
 - **Feed the transcript, not just the URL.** Whisper already produces word-level timestamps (`transcriber.py`). Run it on the full source (or a downloaded long video), chunk the transcript, and ask the LLM to propose segment boundaries with real timestamps + a title + a one-line description per segment. Grounding on the transcript makes start/end accurate instead of guessed.
-- **Pluggable LLM provider** (owner's words: "next bisa pakai Gemini berbayar atau pakai model kita sendiri"):
+- **Pluggable LLM provider** (owner's words: "later we can use the paid Gemini API or use our own model"):
   - **Gemini paid API** — official `google-genai` SDK, stable JSON output (response schema / JSON mode).
   - **Own model (vLLM)** — the internal OpenAI-compatible Qwen endpoint already used by `email_categorizer` and the `illustrator` sibling (`VLLM_BASE_URL`/`VLLM_MODEL`/`VLLM_API_KEY`). Reuse the same client pattern (`illustrator/backend/llm.py`).
   - Abstract behind one `segment_video(transcript, instruction) -> [{start,end,title,description}]` function with a `SEGMENTER_PROVIDER` env switch, so swapping providers doesn't touch the rest.
@@ -111,7 +111,7 @@ Build segmentation **into** clipper as a step before Position: input URL (+ opti
 
 - Transcript of a *full* long video can be big — chunk + map-reduce the segmentation prompt, or summarize first? Cost/latency vs. accuracy.
 - Whisper on a full long video is slow on CPU — do we require the user to set a coarse range first, or accept the wait / require GPU?
-- How much should the user steer it — free-text instruction ("clip semua reaksi") vs. presets (reactions / highlights / chapters)?
+- How much should the user steer it — free-text instruction ("clip all the reaction segments") vs. presets (reactions / highlights / chapters)?
 - Validate/clamp LLM timestamps against actual duration (LLM can hallucinate times past the end).
 - Provider abstraction: where do per-provider keys live (`.env`), and what's the default when none is set?
 
@@ -162,56 +162,57 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 
 ---
 
-## Transcription accuracy (Whisper) — "voicenya kurang akurat"
+## Transcription accuracy (Whisper) — "the voice isn't accurate enough"
 
-**Status:** ✅ sebagian besar DONE 2026-06 (shared dengan illustrator — `transcriber.py` identik).
-Dikerjain: GPU auto (torch di-fix ke `cu128`), default model **medium** di GPU, `WHISPER_LANGUAGE=id`
-(via `clipper/.env`), `condition_on_previous_text=False`, VRAM dibebasin abis transcribe + fallback CPU
-pas OOM. **Sisa (stretch):** `large-v3`/faster-whisper buat akurasi maksimal, dan `initial_prompt`
-dari title/description (param-nya udah ada, tinggal di-plumb ke `/api/transcribe`).
+**Status:** ✅ mostly DONE 2026-06 (shared with illustrator — `transcriber.py` is identical).
+Done: auto GPU (torch fixed to `cu128`), default model **medium** on GPU, `WHISPER_LANGUAGE=id`
+(via `clipper/.env`), `condition_on_previous_text=False`, VRAM freed after transcribe + CPU fallback
+on OOM. **Remaining (stretch):** `large-v3`/faster-whisper for maximum accuracy, and `initial_prompt`
+from title/description (the param already exists, it just needs to be plumbed into `/api/transcribe`).
 
 **Why**
 
-Whisper sering salah dengar, terutama **bahasa Indonesia** + **nama/istilah khusus** (nama
-orang, tempat, istilah agama/teknis). Caption jadi salah kata, dan karena per-word timing
-dipakai buat karaoke highlight (`_group_words`/`_build_ass`), salah kata = highlight meleset
-juga. Roadmap #4 ("Edit transcript") cuma nambal **manual setelah** salah; issue ini soal bikin
-transkripsinya lebih bener **dari awal**. (Lihat juga gotcha "Whisper model" di CLAUDE.md.)
+Whisper often mishears, especially **Indonesian** + **proper names/specialized terms** (names of
+people, places, religious/technical terms). Captions end up with wrong words, and because per-word
+timing is used for the karaoke highlight (`_group_words`/`_build_ass`), a wrong word means the
+highlight is off too. Roadmap #4 ("Edit transcript") only patches it **manually after** the error;
+this issue is about making the transcription more correct **from the start**. (See also the "Whisper
+model" gotcha in CLAUDE.md.)
 
 **Root cause** (`backend/transcriber.py`)
 
-1. Model **hardcoded `base`** — tier terkecil yang useful, paling lemah buat non-English.
-2. **Tanpa `language` hint** — `model.transcribe()` auto-detect; gampang meleset / code-switch
-   di konten ID.
-3. **Tanpa `initial_prompt`** — nama diri / istilah domain gak ke-bias → sering salah eja.
-4. **Gak bisa diatur via env** — ganti model = edit kode.
-5. `condition_on_previous_text=True` (default) — bisa repetition/halusinasi pas musik/hening.
+1. Model was **hardcoded to `base`** — the smallest useful tier, the weakest for non-English.
+2. **No `language` hint** — `model.transcribe()` auto-detects; easy to miss or code-switch
+   on Indonesian content.
+3. **No `initial_prompt`** — proper names / domain terms aren't biased → frequently misspelled.
+4. **Not configurable via env** — changing the model meant editing code.
+5. `condition_on_previous_text=True` (default) — can cause repetition/hallucination over music/silence.
 
 **Proposed**
 
-- `WHISPER_MODEL` env (default naikin ke `small`/`medium`; `large-v3` kalau ada GPU).
-- `WHISPER_LANGUAGE` env (mis. `id`) → `transcribe(language=...)`, dengan override.
-- `initial_prompt` opsional buat nge-bias kosakata (dari title/description) → nama diri & istilah
-  konsisten.
-- Set `condition_on_previous_text=False` (atau expose) buat ngurangin loop/halusinasi.
-- **(Stretch, butuh approval)** swap ke `faster-whisper` (CTranslate2): jauh lebih cepat +
-  akurat + VAD bawaan. Ini **ganti tech / dep baru** → approval owner dulu (lihat "Things NOT to do").
+- `WHISPER_MODEL` env (raise the default to `small`/`medium`; `large-v3` if a GPU is available).
+- `WHISPER_LANGUAGE` env (e.g. `id`) → `transcribe(language=...)`, with override.
+- Optional `initial_prompt` to bias vocabulary (from title/description) → consistent proper names &
+  terms.
+- Set `condition_on_previous_text=False` (or expose it) to reduce loops/hallucination.
+- **(Stretch, needs approval)** swap to `faster-whisper` (CTranslate2): much faster +
+  more accurate + built-in VAD. This is a **tech change / new dependency** → get owner approval first (see "Things NOT to do").
 
 **Implementation notes**
 
-- `transcriber.py` **identik di clipper & illustrator** → ubah sekali, mirror ke satu lagi.
-- `get_model` di-`lru_cache` by name — aman buat swap ukuran model.
-- Model lebih gede = lebih lambat di CPU → nyambung ke open question GPU/latency di issue
-  Auto-segment.
+- `transcriber.py` is **identical in clipper & illustrator** → change it once, mirror to the other.
+- `get_model` is `lru_cache`d by name — safe for swapping model sizes.
+- A bigger model = slower on CPU → connects to the GPU/latency open question in the
+  Auto-segment issue.
 
 **Open questions**
 
-- Default model tier vs latency CPU — naikin default atau biarin owner yang pilih (sesuai gotcha
-  "Whisper model": *"Don't auto-detect; let owner choose"*)?
-- faster-whisper = dep baru (CTranslate2) — approve?
-- Language: fix ke `id` atau tetap auto-detect dengan override?
+- Default model tier vs. CPU latency — raise the default or let the owner choose (per the
+  "Whisper model" gotcha: *"Don't auto-detect; let owner choose"*)?
+- faster-whisper = new dependency (CTranslate2) — approve?
+- Language: fix to `id` or keep auto-detect with an override?
 
 **Acceptance**
 
-- Speech ID + nama diri ke-transcribe cukup bener sampai caption kebaca benar & per-word timing
-  tetap nyambung; minim kata ngawur / repetisi.
+- Indonesian speech + proper names transcribe accurately enough that captions read correctly & per-word
+  timing stays in sync; minimal garbled words / repetition.
