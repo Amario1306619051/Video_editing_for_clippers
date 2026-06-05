@@ -33,6 +33,8 @@ const state = {
   caption: { font: 'Anton', size: 64 },  // must match the default <option> in index.html
   renderRange: { start: null, end: null },  // sub-range in seconds, null = open
   drag: null,
+  abDrag: null,                          // 'start' | 'end' while dragging a range handle
+  autoRange: { start: 0, end: null },    // AI auto-box time range (null end = clip end)
   result: null,
 };
 
@@ -59,6 +61,13 @@ document.addEventListener('DOMContentLoaded', () => {
   els.curTime = $('#cur-time');
   els.kfCount1 = $('#kf-count-1');
   els.kfCount2 = $('#kf-count-2');
+  els.abRange = $('#ab-range');
+  els.abBand = $('#ab-band');
+  els.abHStart = $('#ab-h-start');
+  els.abHEnd = $('#ab-h-end');
+  els.abStartLbl = $('#ab-start-lbl');
+  els.abEndLbl = $('#ab-end-lbl');
+  els.abDensity = $('#ab-density');
 
   document.querySelectorAll('.steps .step').forEach(b => {
     b.addEventListener('click', () => {
@@ -85,6 +94,14 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-kf-delete').addEventListener('click', deleteKeyframeAtCurrent);
   $('#btn-kf-toggle-interp').addEventListener('click', toggleInterpAtCurrent);
   $('#kf-list').addEventListener('click', onKfListClick);
+
+  // AI auto-box
+  document.querySelectorAll('.ab-gen').forEach(b =>
+    b.addEventListener('click', () => doAutoBox(+b.dataset.box)));
+  els.abHStart.addEventListener('mousedown', (e) => startAbDrag(e, 'start'));
+  els.abHEnd.addEventListener('mousedown', (e) => startAbDrag(e, 'end'));
+  window.addEventListener('mousemove', onAbDragMove);
+  window.addEventListener('mouseup', () => { state.abDrag = null; });
 
   // custom video controls
   $('#btn-play').addEventListener('click', togglePlay);
@@ -116,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', (e) => {
     if (state.step !== 2) return;
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
     if (e.key === '1' || e.key === '2') {
       e.preventDefault();
       setActiveBox(+e.key);
@@ -174,7 +191,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   updatePills();
+  initCapabilities();
 });
+
+// Disable the AI auto-box UI when the backend has no vision model configured.
+async function initCapabilities() {
+  try {
+    const r = await fetch('/api/capabilities');
+    if (!r.ok) return;
+    const caps = await r.json();
+    if (!caps.vision) {
+      document.querySelectorAll('.ab-gen, #ab-prompt-1, #ab-prompt-2').forEach(el => { el.disabled = true; });
+      setStatus('ab-status', 'AI auto-box is off — no vision model configured (set VISION_BASE_URL / VISION_MODEL in .env).', 'err');
+    }
+  } catch (e) { /* capabilities are best-effort; manual boxing still works */ }
+}
 
 // ───────────────────────── step nav ─────────────────────────
 function canGoToStep(n) {
@@ -198,6 +229,7 @@ function showStep(n) {
       renderTimeline();
       redrawOverlay();
       redrawPreviews();
+      renderAutoRange();
     });
   }
   if (n === 3) {
@@ -1172,6 +1204,95 @@ function drawCaptionPreview(ctx, y) {
   ctx.restore();
 }
 
+// ───────────────────────── AI auto-box ─────────────────────────
+// A single pair of draggable handles on a clip-width bar sets the [start,end]
+// range. "Generate" asks the vision model for the prompted subject's box on
+// frames across that range; the result drops into the ARMED box's keyframes
+// (replacing any inside the range) so it's editable like manual boxing.
+function clampAutoRange() {
+  const dur = state.source ? state.source.duration : 0;
+  let start = state.autoRange.start ?? 0;
+  let end = state.autoRange.end == null ? dur : state.autoRange.end;
+  start = Math.max(0, Math.min(start, dur));
+  end = Math.max(0, Math.min(end, dur));
+  const MIN = 0.2;
+  if (end < start + MIN) {
+    if (state.abDrag === 'start') start = Math.max(0, end - MIN);
+    else end = Math.min(dur, start + MIN);
+  }
+  state.autoRange.start = start;
+  state.autoRange.end = end;
+}
+
+function renderAutoRange() {
+  if (!state.source || !els.abRange) return;
+  const dur = state.source.duration || 1;
+  clampAutoRange();
+  const s = state.autoRange.start;
+  const e = state.autoRange.end == null ? dur : state.autoRange.end;
+  const sp = (s / dur) * 100;
+  const ep = (e / dur) * 100;
+  els.abHStart.style.left = sp + '%';
+  els.abHEnd.style.left = ep + '%';
+  els.abBand.style.left = sp + '%';
+  els.abBand.style.width = Math.max(0, ep - sp) + '%';
+  if (els.abStartLbl) els.abStartLbl.textContent = s.toFixed(1) + 's';
+  if (els.abEndLbl) els.abEndLbl.textContent = e.toFixed(1) + 's';
+}
+
+function startAbDrag(e, which) {
+  e.preventDefault();
+  state.abDrag = which;
+}
+
+function onAbDragMove(e) {
+  if (!state.abDrag || !state.source || !els.abRange) return;
+  const r = els.abRange.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const t = frac * state.source.duration;
+  if (state.abDrag === 'start') state.autoRange.start = t;
+  else state.autoRange.end = t;
+  renderAutoRange();
+}
+
+async function doAutoBox(n) {
+  if (!state.jobId) return;
+  const input = $(`#ab-prompt-${n}`);
+  const prompt = (input ? input.value : '').trim();
+  if (!prompt) { setStatus('ab-status', `Type what Box ${n} should follow first`, 'err'); return; }
+  const dur = state.source.duration;
+  const t0 = Math.max(0, state.autoRange.start || 0);
+  const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
+  const step = +els.abDensity.value || 1.5;
+  const btn = document.querySelector(`.ab-gen[data-box="${n}"]`);
+  if (btn) btn.disabled = true;
+  setStatus('ab-status',
+    `Box ${n}: predicting "${prompt}" over ${t0.toFixed(1)}–${t1.toFixed(1)}s… (AI scanning frames)`);
+  try {
+    const res = await apiPost('/api/autobox', {
+      job_id: state.jobId, prompt, t_start: t0, t_end: t1, box: n, step_seconds: step,
+      lock_size: $('#ab-lock') ? $('#ab-lock').checked : true,
+    });
+    const kfs = res.keyframes || [];
+    if (!kfs.length) {
+      setStatus('ab-status', res.message || 'Nothing detected — try a different prompt or range', 'err');
+      return;
+    }
+    // Keep manual keyframes OUTSIDE the predicted range; replace inside it.
+    const keep = state.keyframes[n].filter(k => k.t < t0 - KF_EPS || k.t > t1 + KF_EPS);
+    state.keyframes[n] = [...keep, ...kfs].sort((a, b) => a.t - b.t);
+    setStatus('ab-status',
+      `${res.message} Added ${kfs.length} keyframes to Box ${n} — drag / resize / delete below.`, 'ok');
+    renderTimeline();
+    redrawOverlay();
+    redrawPreviews();
+  } catch (err) {
+    setStatus('ab-status', 'Failed: ' + err.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ───────────────────────── API ─────────────────────────
 async function apiPost(path, body) {
   const r = await fetch(path, {
@@ -1220,6 +1341,7 @@ async function doDownload() {
     state.currentTime = 0;
     state.words = [];
     state.renderRange = { start: null, end: null };
+    state.autoRange = { start: 0, end: res.duration };
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
     updateRangeMeta();
     setActiveBox(null);

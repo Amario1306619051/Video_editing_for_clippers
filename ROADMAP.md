@@ -8,7 +8,16 @@ See also the "Roadmap (priority order)" section in `CLAUDE.md` for the existing 
 
 ## Vision-LM automatic crop-box detection (replace manual boxes)
 
-**Status:** planned
+**Status:** ✅ DONE 2026-06 (v1). "AI Auto-box" in Step 2: pick a Box, type what to track
+(e.g. "the speaker"), drag a single pair of range handles, hit **Generate** → the Qwen-VL
+endpoint (`vision.py`, `VISION_*` env, shared with browser_agent) is asked for the subject's
+box on frames sampled across the range (`autobox.py`, ThreadPool×4), returning a keyframe
+track (`interp='linear'`, source px) that drops into the armed box and stays fully editable.
+Empirically grounded: coords are 0-1000 normalized → `px=v/1000*W,H`; regex parse (output is
+non-deterministic); largest-area box = subject; **absent subject → no box** (a run of undetected frames becomes a `gap`/black-slot keyframe, so the box is only drawn while the subject is on screen).
+Verified on a real clip (detected the speaker on ~8/8 frames). **Remaining (stretch):** the
+two-box auto-split + on-device tracker alternative below are not done — current v1 does one
+armed box per Generate via the vision LM.
 
 **Current behavior**
 

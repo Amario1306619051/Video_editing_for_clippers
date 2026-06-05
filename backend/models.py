@@ -98,3 +98,25 @@ class RenderResponse(BaseModel):
 
 class CleanupRequest(BaseModel):
     job_id: str
+
+
+class AutoBoxRequest(BaseModel):
+    """Ask the vision model to draw a box track for `prompt` over [t_start, t_end].
+    `box` (1/2) is informational (which slot the user is targeting). The result is
+    a list of keyframes the user can then edit in the Position step."""
+    job_id: str
+    prompt: str
+    t_start: float = 0.0
+    t_end: Optional[float] = None
+    box: int = 1
+    step_seconds: float = 1.5   # sample one frame every N seconds across the range
+    padding: float = 0.05       # expand each detected box by this fraction per side
+    smooth: bool = True         # damp frame-to-frame jitter
+    lock_size: bool = True      # lock one box size across the range (pan only) — stable framing
+
+
+class AutoBoxResponse(BaseModel):
+    keyframes: list[Keyframe] = Field(default_factory=list)
+    sampled: int = 0            # frames the vision model looked at
+    detected: int = 0           # frames where the subject was found
+    message: str = ""

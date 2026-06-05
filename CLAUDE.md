@@ -46,6 +46,7 @@ Caption goes to `y = 720` when both boxes; `y = 960` (frame center) when single 
 - `fastapi` + `uvicorn` — server
 - `yt-dlp` — YouTube download
 - `openai-whisper` — STT with `word_timestamps=True`
+- `openai` — client for the vision-LM endpoint (AI auto-box); optional, feature-gated on `VISION_*`
 - `ffmpeg-python` (imported but most ffmpeg calls are raw `subprocess.run` for filter_complex control)
 - `pydantic` v2 — schemas
 
@@ -67,6 +68,8 @@ clipper/
 │   ├── downloader.py    yt-dlp + ffmpeg trim → temp/{job_id}.mp4
 │   ├── transcriber.py   Whisper wrapper, cached model load
 │   ├── renderer.py      ffmpeg compose: crop → vstack → burn ASS subs
+│   ├── vision.py        Vision-LM client: prompt → bbox (AI auto-box); self-loads .env
+│   ├── autobox.py       Track predictor: sample frames over a range → keyframes
 │   └── models.py        Pydantic request/response schemas
 ├── frontend/
 │   ├── index.html       3 panels (source/position/render), step nav
@@ -88,6 +91,8 @@ All under `/api/`. Bodies are JSON, responses are JSON.
 | POST   | `/api/download`  | `{url, start, end, title, description}` | `{job_id, video_path, duration, width, height}` |
 | POST   | `/api/transcribe`| `{job_id}`                           | `{words: [{word, start, end}]}`              |
 | POST   | `/api/render`    | `{job_id, title, box1, box2, words, caption_font, caption_size, cleanup}` | `{output_path, filename}` |
+| POST   | `/api/autobox`   | `{job_id, prompt, t_start, t_end, box, step_seconds}` | `{keyframes:[Keyframe], sampled, detected, message}` |
+| GET    | `/api/capabilities` | —                                 | `{vision: bool}` (is AI auto-box available)  |
 | POST   | `/api/cleanup`   | `{job_id}`                           | `{ok: true}`                                 |
 | GET    | `/temp/{name}`   | —                                    | mp4 stream (for browser preview)             |
 | GET    | `/output/{name}` | —                                    | mp4 download                                 |
@@ -221,6 +226,14 @@ Other accuracy/robustness choices in `transcribe()`:
 
 **GPU gotcha (the big one):** the installed `torch` build must match the NVIDIA driver's CUDA version, or `torch.cuda.is_available()` is silently `False` → Whisper runs on CPU (a bigger model is then painfully slow). Driver here supports CUDA 12.8, so torch must be a `cu12x` build. `requirements.txt` pins `torch==2.11.0+cu128` (+ the cu128 index) for exactly this reason — a plain install pulled a `cu13` build that couldn't see the GPU.
 
+### AI auto-box (vision-LM) — `vision.py` + `autobox.py`
+In Step 2 the user picks a Box, types what to track (e.g. "the speaker"), drags a single pair of timeline handles to set `[t_start, t_end]`, and hits **Generate** → `/api/autobox` samples frames across the range, asks the vision model for the subject's box on each, and returns a keyframe track that drops into the **armed box** (replacing keyframes inside the range) — fully editable afterwards (drag / resize / delete) like manual boxing.
+- **Vision model = a SEPARATE OpenAI-compatible Qwen-VL endpoint** (`VISION_BASE_URL`/`VISION_MODEL`, same one browser_agent uses). Optional: if unset, `/api/capabilities` returns `{vision:false}` and the frontend disables the auto-box UI. `vision.py` self-loads `.env` (clipper has no `config.py`).
+- **Coordinate convention (verified empirically): the model returns `bbox_2d=[xmin,ymin,xmax,ymax]` in 0-1000 NORMALIZED units** — NOT pixels, NOT Gemini's `[ymin,xmin,...]` order. Convert per-axis: `px = v/1000*W` (x), `v/1000*H` (y), then clamp. Aspect-independent (use native frame W/H). A single normalized formula is correct for every frame; do NOT add an absolute-px fallback.
+- **Parse is regex, never `json.loads`**: output is non-deterministic even at temp 0 (```json fences, an optional `label`, sometimes a bare `[[...]]` without the key, occasionally malformed JSON). `_parse_boxes` prefers `bbox_2d`-keyed arrays, falls back to any bare 4-number array, and picks the **largest-area** box (= main subject; avoids audience/background). **Absent subject → the model returns `[]` (no hallucinated box) → no detection.** A run of absent frames (subject not in the shot) becomes a `gap` keyframe so the slot renders BLACK — the box is simply NOT drawn when the subject isn't there. A lone single miss (likely a model hiccup, subject still present) is tolerated and bridged.
+- Frames are downscaled to ≤1280px before sending (normalized coords are scale-free → still converted with source W/H). Vision calls run `ThreadPoolExecutor(max_workers=4)` — the endpoint's clean-concurrency sweet spot (study: 4 great, ≤6 ok). `MAX_FRAMES=80` caps cost on long ranges (the response message says when the step was widened). Absent stretches become `gap` keyframes (empty/black slot) — `_build_keyframes` handles the present→absent→present transitions (gap on runs of ≥2 misses or absence at the range start/end; lone misses bridged), so the box appears only while the subject is actually on screen.
+- **Stable size (default, `lock_size=True`)**: a two-pass step — after predicting every frame, `_stabilize_size` locks ONE box size for the whole range (the ~85th percentile of widths/heights) and only PANS the center. Kills zoom jitter (per-frame sizes otherwise wobble); constant size also renders as a smooth expression-crop instead of stepped per-segment crops. Toggle off (UI "Stable size") for adaptive per-frame size.
+
 ### No state persistence
 Restarting the server loses all in-flight jobs. `temp/` survives, but the frontend forgets its `job_id`. This is intentional — single-user local tool, no need for Redis/SQLite. Don't add persistence without asking.
 
@@ -250,6 +263,7 @@ Flow (post-rework): Source → Position → **Render Final (with Caption)** — 
 7. ~~Smooth keyframe interpolation~~ — **DONE** (2026-05). Linear interp between keyframes via per-frame ffmpeg `crop` expressions. Smoother curves (cubic/easing) is a future option if the linear pans feel mechanical.
 8. ~~Better caption fonts / styling~~ — **DONE** (2026-05). Bundled Anton (default) + Bebas Neue in `assets/fonts/`, libass pointed via `fontsdir=`, fat outline + TikTok-karaoke per-word highlight. See `ROADMAP.md` + "Caption styling" gotcha below. Remaining stretch (box bg / accent-fill / fades) is optional.
 9. **Auto-segment long video → clip list (LLM)** — segmentation (which moments to clip, with start/end/title/description) is currently done manually in Gemini web and pasted in. Build it into the tool: transcribe → LLM proposes segments grounded on the transcript → emit the `config.json` job schema. Pluggable provider (Gemini paid API **or** own vLLM/Qwen endpoint like `illustrator`). Ties into batch mode (#6). Full spec in `ROADMAP.md`.
+10. ~~Vision-LM automatic crop-box detection (AI auto-box)~~ — **DONE** (2026-06). Type a prompt + drag a range → the Qwen-VL endpoint draws a bbox track that drops into the armed box as editable keyframes. This is ROADMAP issue #1. See the "AI auto-box" gotcha + `vision.py` / `autobox.py`.
 
 ## Things NOT to do
 

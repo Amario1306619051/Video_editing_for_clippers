@@ -114,6 +114,40 @@
           </div>
         </div>
 
+        <div class="autobox">
+          <div class="autobox-head">
+            <span class="autobox-title">✨ AI Auto-box</span>
+            <span class="hint">Each box gets its own prompt — type what it should follow, set the range below, hit its Generate. The AI draws a box track that lands as editable keyframes (drag / resize / delete).</span>
+          </div>
+          <div class="autobox-row">
+            <span class="ab-boxlbl"><span class="dot dot-1"></span> Box 1</span>
+            <input type="text" id="ab-prompt-1" placeholder="what Box 1 (top) follows — e.g. the speaker's face">
+            <button class="primary ab-gen" data-box="1">Generate</button>
+          </div>
+          <div class="autobox-row">
+            <span class="ab-boxlbl"><span class="dot dot-2"></span> Box 2</span>
+            <input type="text" id="ab-prompt-2" placeholder="what Box 2 (bottom) follows — e.g. the whiteboard">
+            <button class="primary ab-gen" data-box="2">Generate</button>
+          </div>
+          <div class="autobox-row ab-opts">
+            <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
+            <select id="ab-density" title="sampling density (more = smoother but slower)">
+              <option value="3">Fast · 3s</option>
+              <option value="1.5" selected>Balanced · 1.5s</option>
+              <option value="0.8">Smooth · 0.8s</option>
+            </select>
+            <span class="ab-range-lbl">range: <b id="ab-start-lbl">0.0s</b> → <b id="ab-end-lbl">end</b></span>
+          </div>
+          <div class="ab-range" id="ab-range" title="drag the two handles to set the time range to auto-predict (shared by both boxes)">
+            <div class="ab-band" id="ab-band"></div>
+            <div class="ab-handle" id="ab-h-start" data-which="start" title="range start"></div>
+            <div class="ab-handle" id="ab-h-end" data-which="end" title="range end"></div>
+          </div>
+          <div class="ab-foot">
+            <span class="status" id="ab-status"></span>
+          </div>
+        </div>
+
         <div class="kf-controls">
           <button id="btn-kf-toggle-interp">Toggle interp on this kf (Hold ↔ Linear)</button>
           <button id="btn-kf-delete">Delete keyframe at this time</button>
