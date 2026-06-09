@@ -6,11 +6,27 @@ See also the "Roadmap (priority order)" section in `CLAUDE.md` for the existing 
 
 ---
 
+## Intro card + voiceover (TTS) — DONE (2026-06)
+
+**Status:** ✅ shipped (clipper, toggled in the Render step).
+
+Prepend an **intro card** to the render: the **Thumbnail** image shown for a few seconds with a **Piper TTS voiceover** reading the headline, then a **transition** into the content (crossfade / dissolve / zoom in / slide / circle / cut). Piper = local & free; Indonesian voice `id_ID-news_tts-medium` in `clipper/voices/` (gitignored). Two-pass render (`renderer._prepend_intro`): compose thumbnail → `/api/intro-image` → xfade + acrossfade into the main mp4. `intro_dur = max(min-duration, voice length + 0.4)`. Best-effort (a TTS/intro failure keeps the plain render). See CLAUDE.md "Intro card / voiceover". `tts.py`. This is the intro-card+voice idea — distinct from the still-open "in-video text hook" (text over the first seconds of the content).
+
+---
+
+## Trim — multi-segment keep (cut dead air) — DONE (2026-06)
+
+**Status:** ✅ shipped (clipper Step 7 "Trim").
+
+Mark keep-windows (A→B, any number) on a timeline; everything outside is cut at render and the kept parts stitched. For removing dead air / noisy stretches. Render-time `select`/`aselect` at the END of the filter chain (compose first, then drop gaps → no metadata remap). Overrides the single render sub-range. Removes whole time-regions (video+audio), not a spectral denoise. See CLAUDE.md "Trim / multi-segment keep". Clipper-only.
+
+---
+
 ## Illustration cutaways (Pexels, manual) — DONE (2026-06)
 
 **Status:** ✅ shipped (clipper Step 6 "Illustration").
 
-Search Pexels → drop **full-frame 9:16 cutaways** onto the clip (the image fills the whole frame for its window). Place several, **drag to move** + **resize duration** on a mini-timeline. Unlike illustrator's auto bottom-slot illustrations, placement is fully manual. Picked images downloaded only at render (deduped, cleaned with the job); overlaid via `overlay=enable=between(t,…)` before the caption burn. Needs `PEXELS_API_KEY` in `clipper/.env` (same key as illustrator). See CLAUDE.md "Illustration cutaways". `pexels.py`. Not wired into the batch-queue auto-render.
+Search Pexels → drop image cutaways onto the clip. Place several, **drag to move** + **resize duration** on a mini-timeline, with a **live composite preview**. Each cutaway has a **target** (`full` / `box1` top / `box2` bottom — fills the whole frame or just that box region) and a **fit** (`cover` / `blur`). Unlike illustrator's auto bottom-slot illustrations, placement is fully manual. Picked images downloaded only at render (deduped, cleaned with the job); overlaid per-region via `overlay=x:y:enable=between(t,…)` before the caption burn. Needs `PEXELS_API_KEY` in `clipper/.env` (same key as illustrator). See CLAUDE.md "Illustration cutaways". `pexels.py`. Not wired into the batch-queue auto-render.
 
 ---
 
@@ -185,9 +201,11 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 
 ## Thumbnail generator (cover image for the clip) — DONE (2026-06)
 
-**Status:** ✅ shipped. A standalone **Thumbnail** step (panel 4).
+**Status:** ✅ shipped (Thumbnail step, last in the nav).
 
-**What shipped:** pick a frame on a dedicated scrubber → the text LLM proposes eye-catching headline ideas (`POST /api/thumbnail-text`), editable or type your own → style it (font / size / color / outline / position / UPPERCASE / shade + a cover-crop focus pan) → **Download PNG** at 1080×1920.
+**What shipped:** a **multi-box background** — `full` (1 box) or `2 box` (top 3/8 + bottom 5/8); each box's source is a **Scene** (captured video frame, cropped to the Position bbox — each box from its own scrubbed time) or an **Illustration** (per-box Pexels search), with cover/blur fit. Plus the AI headline (`POST /api/thumbnail-text`, editable) + style (font/size/color/outline/position/UPPERCASE/shade) → **Download PNG** at 1080×1920. So a cover can be: both scene, both illustration, mixed, full scene, full illustration, or 1 box.
+
+**Build notes:** client-side canvas (compose + export); Pexels images loaded via `/api/img` same-origin proxy so `toBlob` isn't blocked by a tainted canvas. (v1 was a single full-frame scene + focus pan; upgraded 2026-06 to the multi-box model above.)
 
 **How it differs from the original proposal:** built **client-side on a canvas** (frame capture, cover-crop, text compositing, PNG export) rather than ffmpeg single-frame — instant WYSIWYG, no new temp/output files, no `to_ass_color()` reuse. Aspect is **9:16 only** (the chosen output format) instead of 16:9/1:1 options. The only backend addition is the headline-text LLM call; headlines come back in the content's language. See CLAUDE.md "Thumbnail generator".
 

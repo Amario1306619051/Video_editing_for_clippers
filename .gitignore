@@ -2,6 +2,7 @@
 temp/
 output/
 queue/
+voices/
 soundboard/
 *.mp4
 *.ass

@@ -92,12 +92,36 @@ class SearchResponse(BaseModel):
 
 
 class IllustrationPick(BaseModel):
-    """A picked image shown FULL-FRAME (9:16 cutaway) over [t_start, t_end].
-    Times are clip-relative (re-based to a render sub-range). `url` is the
-    picked candidate's `full` URL — downloaded at render, deduped by URL."""
+    """A picked image overlaid over [t_start, t_end]. `target` chooses the region
+    it fills: 'full' (whole 9:16), 'box1' (top slot) or 'box2' (bottom slot) —
+    "represents" that box. `fit` is 'cover' (scale-cover + crop) or 'blur'
+    (contained + blurred pad). Times are clip-relative; `url` is the candidate's
+    `full` URL, downloaded at render (deduped)."""
     t_start: float
     t_end: float
     url: str
+    target: str = "full"   # 'full' | 'box1' (top slot) | 'box2' (bottom slot)
+    fit: str = "cover"     # 'cover' | 'blur'
+
+
+class IntroConfig(BaseModel):
+    """An intro card prepended to the render: the thumbnail (uploaded to
+    temp/{job}_intro.png via /api/intro-image) shown for `duration`s with a Piper
+    voiceover reading `text`, then a `transition` into the content. `transition`
+    is an ffmpeg xfade name (fade/zoomin/slideleft/…) or 'cut' (no animation).
+    Present in RenderRequest = intro on; absent/None = no intro."""
+    transition: str = "fade"
+    duration: float = 4.0
+    text: str = ""
+    voice: bool = True
+
+
+class KeepSegment(BaseModel):
+    """A [start, end] window to KEEP (seconds, clip time). At render, everything
+    OUTSIDE all kept windows is dropped and the kept parts are concatenated —
+    lets the user cut out dead air / noisy stretches by marking what to keep."""
+    start: float
+    end: float
 
 
 class SfxPlacement(BaseModel):
@@ -141,6 +165,11 @@ class RenderRequest(BaseModel):
     sfx: list[SfxPlacement] = Field(default_factory=list)
     # Full-frame illustration cutaways (Pexels images over a time window).
     illustrations: list[IllustrationPick] = Field(default_factory=list)
+    # Multi-segment KEEP trim: only these windows are kept (concatenated); the
+    # rest is dropped at render. Overrides render_start/render_end when set.
+    keep_segments: list[KeepSegment] = Field(default_factory=list)
+    # Optional intro card (thumbnail + voiceover + transition) prepended at render.
+    intro: Optional[IntroConfig] = None
 
 
 class RenderResponse(BaseModel):

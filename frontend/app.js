@@ -43,6 +43,9 @@ const state = {
   sfxPreview: null,                       // currently-playing preview Audio
   ills: [],                               // full-frame illustration cutaways {url,thumb,t_start,t_end}
   illDrag: null,                          // {i, mode:'move'|'resize', ...} while dragging a block
+  keep: [],                               // keep-windows {start,end} (everything else cut at render)
+  keepA: null,                            // pending in-point while marking A→B
+  keepDrag: null,                         // drag state for a keep block
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -201,6 +204,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireQueue();
   wireSfx();
   wireIll();
+  wireTrim();
   updatePills();
   initCapabilities();
 });
@@ -226,6 +230,10 @@ async function initCapabilities() {
       if (q) q.disabled = true;
       setStatus('ill-status', 'Illustration search is off — set PEXELS_API_KEY in clipper/.env (same key as illustrator).', 'err');
     }
+    if (!caps.tts) {
+      const vc = $('#rd-intro-voice');
+      if (vc) { vc.checked = false; vc.disabled = true; vc.closest('label').title = 'No Piper voice installed (clipper/voices/*.onnx) — intro will be silent.'; }
+    }
   } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
 }
 
@@ -237,12 +245,13 @@ function canGoToStep(n) {
   if (n === 4) return !!state.jobId;
   if (n === 5) return !!state.jobId;
   if (n === 6) return !!state.jobId;
+  if (n === 7) return !!state.jobId;
   return false;
 }
 
 function showStep(n) {
   state.step = n;
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= 7; i++) {
     $(`#panel-${i}`).classList.toggle('hidden', i !== n);
   }
   document.querySelectorAll('.steps .step').forEach(b => {
@@ -269,6 +278,9 @@ function showStep(n) {
   }
   if (n === 6) {
     requestAnimationFrame(initIllStep);
+  }
+  if (n === 7) {
+    requestAnimationFrame(initTrimStep);
   }
 }
 
@@ -1378,6 +1390,8 @@ async function doDownload() {
     state.autoRange = { start: 0, end: res.duration };
     state.sfx = [];                // placements are per-clip
     state.ills = [];               // cutaways are per-clip
+    state.keep = []; state.keepA = null;  // keep-windows are per-clip
+    resetThumbSlots();             // thumbnail backgrounds reference the old clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
     updateRangeMeta();
@@ -1483,7 +1497,8 @@ function buildRenderBody(withWords) {
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
     sfx: state.sfx,
-    illustrations: state.ills.map(c => ({ t_start: c.t_start, t_end: c.t_end, url: c.url })),
+    illustrations: state.ills.map(c => ({ t_start: c.t_start, t_end: c.t_end, url: c.url, target: c.target || 'full', fit: c.fit || 'cover' })),
+    keep_segments: state.keep.map(s => ({ start: s.start, end: s.end })),
   };
   logBoxes(body);
   return body;
@@ -1555,10 +1570,36 @@ async function renderOnce(withWords) {
   showResultHeader(withWords);
   setResultLoading(true);
   setStatus('rd-status', `Rendering${withWords ? ' + caption' : ''} · ${activeFitSummary()}…`);
-  const result = await apiPost('/api/render', buildRenderBody(withWords));
+  const body = buildRenderBody(withWords);
+  // Intro card: compose the thumbnail, upload it, attach the intro config.
+  if ($('#rd-intro') && $('#rd-intro').checked) {
+    setStatus('rd-status', 'Composing intro card…');
+    try { await prepareIntro(); } catch (e) { setStatus('rd-status', 'Intro skipped: ' + e.message, 'err'); }
+    const voiceOn = $('#rd-intro-voice') && $('#rd-intro-voice').checked && !$('#rd-intro-voice').disabled;
+    body.intro = {
+      transition: $('#rd-intro-trans').value,
+      duration: +$('#rd-intro-dur').value || 4,
+      text: (thumb.text || $('#f-title').value || '').trim(),
+      voice: !!voiceOn,
+    };
+    setStatus('rd-status', `Rendering${withWords ? ' + caption' : ''} + intro…`);
+  }
+  const result = await apiPost('/api/render', body);
   fillResult(result, withWords);
   state.result = result;
   setStatus('rd-status', `Done · saved as ${result.filename}`, 'ok');
+}
+
+// Compose the Thumbnail at 1080×1920 and upload it as the intro card.
+async function prepareIntro() {
+  try { await document.fonts.load(`bold ${thumb.size}px "${thumb.font}"`); } catch (_) {}
+  const off = document.createElement('canvas');
+  off.width = OUT_W; off.height = OUT_H;
+  drawThumbnailInto(off.getContext('2d'), OUT_W, OUT_H);
+  const blob = await new Promise(res => off.toBlob(res, 'image/png'));
+  if (!blob) throw new Error('could not compose the thumbnail (set it up in Step 7)');
+  const r = await fetch(`/api/intro-image?job_id=${encodeURIComponent(state.jobId)}`, { method: 'POST', body: blob });
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
 }
 
 async function doRender() {
@@ -1621,18 +1662,17 @@ async function doDone() {
 // eye-catching headline (LLM) or type your own, then export a 1080×1920 PNG.
 // Everything (frame capture, compositing, export) is client-side canvas — the
 // only backend call is /api/thumbnail-text for the suggested wording.
+function newThumbSlot() {
+  return { kind: 'scene', fit: 'cover', snap: null, snapBox: null, snapTime: null,
+           illImg: null, illUrl: null, illThumb: null };
+}
 const thumb = {
-  text: '',
-  font: 'Anton',
-  size: 130,         // headline size in OUTPUT (1080-wide) pixels
-  color: '#ffffff',
-  stroke: '#000000',
-  pos: 'bottom',     // top | middle | bottom
-  upper: true,
-  shade: true,
-  panX: 0.5,         // horizontal focus of the cover crop (0..1)
-  panY: 0.5,         // vertical focus
+  text: '', font: 'Anton', size: 130, color: '#ffffff', stroke: '#000000',
+  pos: 'bottom', upper: true, shade: true,
+  layout: 'two',                         // 'full' (1 box) | 'two' (top 3/8 + bottom 5/8)
+  slots: [newThumbSlot(), newThumbSlot()],  // 0 = top/full → box1 ; 1 = bottom → box2
 };
+function resetThumbSlots() { thumb.slots = [newThumbSlot(), newThumbSlot()]; }
 
 function wireThumb() {
   els.thumbVideo = $('#thumb-video');
@@ -1641,28 +1681,25 @@ function wireThumb() {
   const v = els.thumbVideo;
 
   v.addEventListener('loadedmetadata', () => {
-    const dur = v.duration || 0;
-    const scr = $('#thumb-scrubber');
-    if (scr) scr.max = dur;
-    const d = $('#thumb-dur'); if (d) d.textContent = formatTime(dur);
+    const scr = $('#thumb-scrubber'); if (scr) scr.max = v.duration || 0;
+    const d = $('#thumb-dur'); if (d) d.textContent = formatTime(v.duration || 0);
     drawThumb();
   });
-  v.addEventListener('loadeddata', drawThumb);   // first frame decoded → paint it
+  v.addEventListener('loadeddata', drawThumb);
   v.addEventListener('seeked', drawThumb);
   v.addEventListener('timeupdate', () => {
     const t = $('#thumb-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
   });
-
   $('#thumb-scrubber').addEventListener('input', (e) => {
     if (!v.duration) return;
     v.currentTime = +e.target.value;
     const t = $('#thumb-time'); if (t) t.textContent = formatTime(+e.target.value);
   });
 
+  // headline text controls
   $('#thumb-text').addEventListener('input', (e) => { thumb.text = e.target.value; drawThumb(); });
   $('#thumb-font').addEventListener('change', (e) => {
     thumb.font = e.target.value;
-    // wait for the webfont so the preview uses the real glyphs, not a fallback
     document.fonts.load(`bold 120px "${thumb.font}"`).then(drawThumb).catch(drawThumb);
   });
   $('#thumb-size').addEventListener('input', (e) => { thumb.size = +e.target.value || 130; drawThumb(); });
@@ -1671,59 +1708,207 @@ function wireThumb() {
   $('#thumb-pos').addEventListener('change', (e) => { thumb.pos = e.target.value; drawThumb(); });
   $('#thumb-upper').addEventListener('change', (e) => { thumb.upper = e.target.checked; drawThumb(); });
   $('#thumb-shade').addEventListener('change', (e) => { thumb.shade = e.target.checked; drawThumb(); });
-  $('#thumb-pan').addEventListener('input', (e) => { thumb.panX = (+e.target.value) / 100; drawThumb(); });
-  $('#thumb-pany').addEventListener('input', (e) => { thumb.panY = (+e.target.value) / 100; drawThumb(); });
   $('#btn-thumb-gen').addEventListener('click', doThumbGen);
   $('#btn-thumb-dl').addEventListener('click', downloadThumb);
+
+  // background layout toggle
+  document.querySelectorAll('#thumb-layout-toggle .seg').forEach(b => b.addEventListener('click', () => {
+    thumb.layout = b.dataset.layout;
+    renderThumbLayoutToggle(); renderThumbSlots(); drawThumb();
+  }));
+}
+
+function renderThumbLayoutToggle() {
+  document.querySelectorAll('#thumb-layout-toggle .seg')
+    .forEach(b => b.classList.toggle('active', b.dataset.layout === thumb.layout));
 }
 
 function initThumbStep() {
   if (!state.source || !els.thumbVideo) return;
   const v = els.thumbVideo;
-  // (Re)point at the current source — a fresh download changes the path.
   if (v.dataset.path !== state.source.video_path) {
     v.dataset.path = state.source.video_path;
     v.src = state.source.video_path;
   }
-  // Seed the text from the title once (if the user left it default/empty).
   const ta = $('#thumb-text');
   if (ta && !ta.value) {
     const t = ($('#f-title').value || '').trim();
     if (t && t.toLowerCase() !== 'clip') { ta.value = t; thumb.text = t; }
   }
+  renderThumbLayoutToggle();
+  renderThumbSlots();
   drawThumb();
 }
 
-// Draw the preview at the canvas' display resolution (405×720).
+function thumbSlotCount() { return thumb.layout === 'full' ? 1 : 2; }
+function thumbSlotLabel(i) {
+  if (thumb.layout === 'full') return 'Background';
+  return i === 0 ? 'Top (Box 1)' : 'Bottom (Box 2)';
+}
+
+// Render the per-box source cards (Scene / Illustration + fit) into #thumb-slots.
+function renderThumbSlots() {
+  const box = $('#thumb-slots');
+  if (!box) return;
+  let html = '';
+  for (let i = 0; i < thumbSlotCount(); i++) {
+    const s = thumb.slots[i];
+    const stat = s.kind === 'scene'
+      ? (s.snap ? `captured @ ${(s.snapTime || 0).toFixed(1)}s ✓` : 'not captured yet')
+      : (s.illThumb ? 'image picked ✓' : 'no image yet');
+    html += `<div class="thumb-slot" data-i="${i}">
+      <div class="thumb-slot-head">${thumbSlotLabel(i)}</div>
+      <div class="thumb-row">
+        <div class="thumb-seg thumb-src">
+          <button class="seg ${s.kind === 'scene' ? 'active' : ''}" data-src="scene" data-i="${i}">Scene</button>
+          <button class="seg ${s.kind === 'ill' ? 'active' : ''}" data-src="ill" data-i="${i}">Illustration</button>
+        </div>
+        <select class="thumb-fit" data-i="${i}" title="fit"><option value="cover"${s.fit === 'cover' ? ' selected' : ''}>Cover</option><option value="blur"${s.fit === 'blur' ? ' selected' : ''}>Blur</option></select>
+      </div>
+      ${s.kind === 'scene' ? `
+        <div class="thumb-scene">
+          <button class="thumb-capture" data-i="${i}">📸 Capture current frame</button>
+          <span class="status thumb-snap ${s.snap ? 'ok' : ''}">${stat}</span>
+        </div>` : `
+        <div class="thumb-ill">
+          <div class="thumb-ill-search"><input class="thumb-ill-q" data-i="${i}" placeholder="search Pexels"><button class="thumb-ill-go" data-i="${i}">Search</button></div>
+          <div class="thumb-ill-cands" data-i="${i}"></div>
+          <span class="status thumb-ill-status ${s.illThumb ? 'ok' : ''}" data-i="${i}">${stat}</span>
+        </div>`}
+    </div>`;
+  }
+  box.innerHTML = html;
+  box.querySelectorAll('.thumb-src .seg').forEach(b => b.addEventListener('click', () => {
+    thumb.slots[+b.dataset.i].kind = b.dataset.src; renderThumbSlots(); drawThumb();
+  }));
+  box.querySelectorAll('.thumb-fit').forEach(s => s.addEventListener('change', (e) => {
+    thumb.slots[+e.target.dataset.i].fit = e.target.value; drawThumb();
+  }));
+  box.querySelectorAll('.thumb-capture').forEach(b => b.addEventListener('click', () => captureSlot(+b.dataset.i)));
+  box.querySelectorAll('.thumb-ill-go').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.i;
+    thumbIllSearch(i, box.querySelector(`.thumb-ill-q[data-i="${i}"]`).value.trim());
+  }));
+  box.querySelectorAll('.thumb-ill-q').forEach(inp => inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') thumbIllSearch(+e.target.dataset.i, e.target.value.trim());
+  }));
+}
+
+// Snapshot the current video frame for a Scene slot (in 2-box mode it crops to
+// the Position box: top → box1, bottom → box2; full → the whole frame).
+function captureSlot(i) {
+  const v = els.thumbVideo;
+  if (!v || !v.videoWidth) { setStatus('thumb-status', 'Video not ready yet.', 'err'); return; }
+  const off = document.createElement('canvas');
+  off.width = v.videoWidth; off.height = v.videoHeight;
+  off.getContext('2d').drawImage(v, 0, 0);
+  const s = thumb.slots[i];
+  s.snap = off; s.snapTime = v.currentTime || 0;
+  if (thumb.layout === 'two') {
+    const b = boxAt(i === 0 ? 1 : 2, s.snapTime);
+    s.snapBox = b ? { x: b.x, y: b.y, w: b.w, h: b.h } : null;
+  } else {
+    s.snapBox = null;
+  }
+  renderThumbSlots(); drawThumb();
+}
+
+async function thumbIllSearch(i, q) {
+  const box = $('#thumb-slots');
+  const cont = box && box.querySelector(`.thumb-ill-cands[data-i="${i}"]`);
+  const st = box && box.querySelector(`.thumb-ill-status[data-i="${i}"]`);
+  if (!q) { if (st) { st.textContent = 'Type a query.'; st.className = 'status thumb-ill-status err'; } return; }
+  if (st) { st.textContent = 'Searching…'; st.className = 'status thumb-ill-status'; }
+  try {
+    const res = await apiPost('/api/search', { query: q });
+    const cands = res.candidates || [];
+    if (cont) {
+      cont.innerHTML = cands.map(c => `<button class="thumb-cand" data-url="${escapeHtml(c.full)}" data-thumb="${escapeHtml(c.thumb)}"><img src="${escapeHtml(c.thumb)}" loading="lazy" alt=""></button>`).join('');
+      cont.querySelectorAll('.thumb-cand').forEach(b => b.addEventListener('click', () => pickThumbIll(i, b.dataset.url, b.dataset.thumb)));
+    }
+    if (st) { st.textContent = cands.length ? 'Click an image.' : 'No results.'; st.className = 'status thumb-ill-status ' + (cands.length ? 'ok' : 'err'); }
+  } catch (e) {
+    if (st) { st.textContent = 'Failed: ' + e.message; st.className = 'status thumb-ill-status err'; }
+  }
+}
+
+function pickThumbIll(i, fullUrl, thumbUrl) {
+  const s = thumb.slots[i];
+  const img = new Image();
+  img.onload = drawThumb;
+  // via the same-origin proxy so the canvas isn't tainted (export would fail)
+  img.src = '/api/img?url=' + encodeURIComponent(fullUrl);
+  s.illImg = img; s.illUrl = fullUrl; s.illThumb = thumbUrl;
+  renderThumbSlots(); drawThumb();
+}
+
+// Draw the preview at the canvas' display resolution.
 function drawThumb() {
   const c = els.thumbCanvas;
   if (!c) return;
   drawThumbnailInto(c.getContext('2d'), c.width, c.height);
 }
 
+function thumbSlotRects(W, H) {
+  if (thumb.layout === 'full') return [[0, 0, W, H]];
+  const top = H * 3 / 8;
+  return [[0, 0, W, top], [0, top, W, H - top]];
+}
+
 // Parametric so the same code renders the preview AND the 1080×1920 export.
 function drawThumbnailInto(ctx, W, H) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
-  drawThumbBg(ctx, W, H);
+  thumbSlotRects(W, H).forEach((r, i) => drawThumbSlot(ctx, thumb.slots[i], r[0], r[1], r[2], r[3]));
   if (thumb.shade) drawThumbShade(ctx, W, H);
   drawThumbText(ctx, W, H);
 }
 
-// Cover-fit the picked frame into 9:16, positioned by the focus sliders.
-function drawThumbBg(ctx, W, H) {
-  const v = els.thumbVideo;
-  const vw = v ? v.videoWidth : 0;
-  const vh = v ? v.videoHeight : 0;
-  if (!vw || !vh) return;
-  const dstAR = W / H, srcAR = vw / vh;
-  let sw, sh, sx, sy;
-  if (srcAR > dstAR) {            // source wider → crop left/right
-    sh = vh; sw = vh * dstAR; sy = 0; sx = (vw - sw) * thumb.panX;
-  } else {                        // source taller → crop top/bottom
-    sw = vw; sh = vw / dstAR; sx = 0; sy = (vh - sh) * thumb.panY;
+// cover / contain a SOURCE REGION (sx,sy,sw,sh) of `src` into a dest rect.
+function coverRegion(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh) {
+  const rAR = sw / sh, dAR = dw / dh;
+  let cw, ch, cx, cy;
+  if (rAR > dAR) { ch = sh; cw = sh * dAR; cx = sx + (sw - cw) / 2; cy = sy; }
+  else { cw = sw; ch = sw / dAR; cx = sx; cy = sy + (sh - ch) / 2; }
+  try { ctx.drawImage(src, cx, cy, cw, ch, dx, dy, dw, dh); } catch (_) {}
+}
+function containRegion(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh) {
+  const rAR = sw / sh, dAR = dw / dh;
+  let ow, oh;
+  if (rAR > dAR) { ow = dw; oh = dw / rAR; } else { oh = dh; ow = dh * rAR; }
+  try { ctx.drawImage(src, sx, sy, sw, sh, dx + (dw - ow) / 2, dy + (dh - oh) / 2, ow, oh); } catch (_) {}
+}
+
+function drawThumbSlot(ctx, slot, dx, dy, dw, dh) {
+  if (!slot) return;
+  let src = null, sx = 0, sy = 0, sw = 0, sh = 0;
+  if (slot.kind === 'ill' && slot.illImg && slot.illImg.complete && slot.illImg.naturalWidth) {
+    src = slot.illImg; sw = src.naturalWidth; sh = src.naturalHeight;
+  } else if (slot.kind === 'scene' && slot.snap) {
+    src = slot.snap;
+    if (slot.snapBox) { sx = slot.snapBox.x; sy = slot.snapBox.y; sw = slot.snapBox.w; sh = slot.snapBox.h; }
+    else { sw = src.width; sh = src.height; }
   }
-  try { ctx.drawImage(v, sx, sy, sw, sh, 0, 0, W, H); } catch (_) {}
+  if (!src) {  // placeholder
+    ctx.save();
+    ctx.fillStyle = '#15151a'; ctx.fillRect(dx, dy, dw, dh);
+    ctx.fillStyle = '#555'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `${Math.max(9, dw * 0.045)}px JetBrains Mono, monospace`;
+    ctx.fillText(slot.kind === 'ill' ? 'pick an image' : 'capture a frame', dx + dw / 2, dy + dh / 2);
+    ctx.restore();
+    return;
+  }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(dx, dy, dw, dh); ctx.clip();
+  if (slot.fit === 'blur') {
+    ctx.filter = 'blur(10px) brightness(0.9)';
+    coverRegion(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.filter = 'none';
+    containRegion(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh);
+  } else {
+    coverRegion(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh);
+  }
+  ctx.restore();
 }
 
 // Dark gradient behind the text band so any footage stays readable.
@@ -1840,19 +2025,23 @@ async function downloadThumb() {
   try { await document.fonts.load(`bold ${thumb.size}px "${thumb.font}"`); } catch (_) {}
   const off = document.createElement('canvas');
   off.width = OUT_W; off.height = OUT_H;        // 1080×1920
-  drawThumbnailInto(off.getContext('2d'), OUT_W, OUT_H);
-  off.toBlob((blob) => {
-    if (!blob) { setStatus('thumb-status', 'Export failed', 'err'); return; }
-    const a = document.createElement('a');
-    const title = ($('#f-title').value.trim() || 'clip').replace(/[^\w.-]+/g, '_');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${title}_thumbnail.png`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    setStatus('thumb-status', `Saved ${a.download}`, 'ok');
-  }, 'image/png');
+  try {
+    drawThumbnailInto(off.getContext('2d'), OUT_W, OUT_H);
+    off.toBlob((blob) => {
+      if (!blob) { setStatus('thumb-status', 'Export failed (a background image may be cross-origin).', 'err'); return; }
+      const a = document.createElement('a');
+      const title = ($('#f-title').value.trim() || 'clip').replace(/[^\w.-]+/g, '_');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${title}_thumbnail.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      setStatus('thumb-status', `Saved ${a.download}`, 'ok');
+    }, 'image/png');
+  } catch (e) {
+    setStatus('thumb-status', 'Export failed: ' + e.message, 'err');
+  }
 }
 
 // ───────────────────────── batch queue (sidebar) ─────────────────────────
@@ -1969,6 +2158,8 @@ async function openQueueJob(key) {
   state.words = [];
   state.sfx = [];                  // placements are per-clip
   state.ills = [];                 // cutaways are per-clip
+  state.keep = []; state.keepA = null;  // keep-windows are per-clip
+  resetThumbSlots();               // thumbnail backgrounds reference the old clip
   state.renderRange = { start: null, end: null };
   state.autoRange = { start: 0, end: job.duration };
   // Reflect the job in the Step 1 form + prefill the auto-box prompts so a
@@ -2256,12 +2447,15 @@ function wireIll() {
   v.addEventListener('loadedmetadata', () => {
     const scr = $('#ill-scrubber'); if (scr) scr.max = v.duration || 0;
     const d = $('#ill-dur'); if (d) d.textContent = formatTime(v.duration || 0);
-    renderIllTrack();
+    renderIllTrack(); drawIllPreview();
   });
+  v.addEventListener('loadeddata', drawIllPreview);
+  v.addEventListener('seeked', drawIllPreview);
   v.addEventListener('timeupdate', () => {
     const t = $('#ill-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
     const scr = $('#ill-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
     updateIllCursor();
+    drawIllPreview();
   });
   v.addEventListener('play', () => { const b = $('#ill-play'); if (b) b.textContent = '❚❚'; });
   v.addEventListener('pause', () => { const b = $('#ill-play'); if (b) b.textContent = '▶'; });
@@ -2289,8 +2483,10 @@ function initIllStep() {
   if (!$('#ill-query').value && $('#f-title').value && $('#f-title').value.toLowerCase() !== 'clip') {
     $('#ill-query').value = $('#f-title').value.trim();
   }
+  state.ills.forEach(c => preloadIllImg(c.thumb));
   renderIllTrack();
   renderIllList();
+  drawIllPreview();
 }
 
 async function doIllSearch() {
@@ -2327,10 +2523,12 @@ function addCutaway(url, thumb) {
   let t_end = t + defd;
   if (dur && t_end > dur) t_end = dur;
   if (t_end - t < ILL_MIN_DUR) { setStatus('ill-status', 'Too close to the end — scrub earlier.', 'err'); return; }
-  state.ills.push({ url, thumb, t_start: +t.toFixed(2), t_end: +t_end.toFixed(2) });
+  state.ills.push({ url, thumb, t_start: +t.toFixed(2), t_end: +t_end.toFixed(2), target: 'full', fit: 'cover' });
   state.ills.sort((a, b) => a.t_start - b.t_start);
+  preloadIllImg(thumb);
   renderIllTrack();
   renderIllList();
+  drawIllPreview();
   setStatus('ill-status', `Cutaway added ${t.toFixed(1)}–${t_end.toFixed(1)}s.`, 'ok');
 }
 
@@ -2402,11 +2600,15 @@ function renderIllList() {
     ol.innerHTML = '<li class="empty">No cutaways yet — search, then click an image.</li>';
     return;
   }
+  const tgtOpt = (c, v, lbl) => `<option value="${v}"${(c.target || 'full') === v ? ' selected' : ''}>${lbl}</option>`;
+  const fitOpt = (c, v, lbl) => `<option value="${v}"${(c.fit || 'cover') === v ? ' selected' : ''}>${lbl}</option>`;
   ol.innerHTML = state.ills.map((c, i) => `
     <li>
       <img class="ill-it-thumb" src="${escapeHtml(c.thumb)}" alt="">
       <span class="ill-it-when">${c.t_start.toFixed(1)}–${c.t_end.toFixed(1)}s</span>
       <span class="ill-it-dur">dur <input type="number" class="ill-dur-in" data-i="${i}" min="0.3" step="0.5" value="${(c.t_end - c.t_start).toFixed(1)}"> s</span>
+      <select class="ill-tgt" data-i="${i}" title="which region the image fills">${tgtOpt(c, 'full', 'Full')}${tgtOpt(c, 'box1', 'Box 1 (top)')}${tgtOpt(c, 'box2', 'Box 2 (bot)')}</select>
+      <select class="ill-fit" data-i="${i}" title="fit mode">${fitOpt(c, 'cover', 'Cover')}${fitOpt(c, 'blur', 'Blur')}</select>
       <button class="ill-it-seek" data-seek="${i}" title="seek to its start">▶</button>
       <button class="ill-it-del danger" data-del="${i}" title="remove cutaway">×</button>
     </li>`).join('');
@@ -2417,12 +2619,239 @@ function renderIllList() {
     const c = state.ills[i];
     if (c.t_start + len > dur) len = dur - c.t_start;
     c.t_end = +(c.t_start + len).toFixed(2);
-    renderIllTrack(); renderIllList();
+    renderIllTrack(); renderIllList(); drawIllPreview();
+  }));
+  ol.querySelectorAll('.ill-tgt').forEach(s => s.addEventListener('change', (e) => {
+    state.ills[+e.target.dataset.i].target = e.target.value; drawIllPreview();
+  }));
+  ol.querySelectorAll('.ill-fit').forEach(s => s.addEventListener('change', (e) => {
+    state.ills[+e.target.dataset.i].fit = e.target.value; drawIllPreview();
   }));
   ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
     const c = state.ills[+b.dataset.seek]; if (c && els.illVideo) els.illVideo.currentTime = c.t_start;
   }));
   ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
-    state.ills.splice(+b.dataset.del, 1); renderIllTrack(); renderIllList();
+    state.ills.splice(+b.dataset.del, 1); renderIllTrack(); renderIllList(); drawIllPreview();
+  }));
+}
+
+// ── illustration preview (composite: video frame + cutaway in its target/fit) ──
+const ILL_PV_W = 180, ILL_PV_H = 320;          // 9:16
+const illImgCache = {};
+function preloadIllImg(url) {
+  if (!url || illImgCache[url]) return;
+  const im = new Image();
+  im.crossOrigin = 'anonymous';
+  im.onload = drawIllPreview;
+  im.src = url;
+  illImgCache[url] = im;
+}
+function illSlotRect(target) {
+  const top = ILL_PV_H * 3 / 8;
+  if (target === 'box1') return [0, 0, ILL_PV_W, top];
+  if (target === 'box2') return [0, top, ILL_PV_W, ILL_PV_H - top];
+  return [0, 0, ILL_PV_W, ILL_PV_H];
+}
+function coverDraw(ctx, img, dx, dy, dw, dh) {
+  const iw = img.naturalWidth || img.videoWidth, ih = img.naturalHeight || img.videoHeight;
+  if (!iw || !ih) return;
+  const s = Math.max(dw / iw, dh / ih);
+  const w = iw * s, h = ih * s;
+  ctx.drawImage(img, dx + (dw - w) / 2, dy + (dh - h) / 2, w, h);
+}
+function containDraw(ctx, img, dx, dy, dw, dh) {
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih) return;
+  const s = Math.min(dw / iw, dh / ih);
+  const w = iw * s, h = ih * s;
+  ctx.drawImage(img, dx + (dw - w) / 2, dy + (dh - h) / 2, w, h);
+}
+function drawIllPreview() {
+  const c = $('#ill-preview');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, ILL_PV_W, ILL_PV_H);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, ILL_PV_W, ILL_PV_H);
+  const v = els.illVideo;
+  if (v && v.videoWidth) coverDraw(ctx, v, 0, 0, ILL_PV_W, ILL_PV_H);   // video frame (cover 9:16)
+  const t = v ? (v.currentTime || 0) : 0;
+  const active = (state.ills || []).filter(c => t >= c.t_start && t < c.t_end);
+  for (const cut of active) {
+    const img = illImgCache[cut.thumb];
+    if (!img || !img.complete || !img.naturalWidth) { preloadIllImg(cut.thumb); continue; }
+    const [x, y, w, h] = illSlotRect(cut.target || 'full');
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    if ((cut.fit || 'cover') === 'blur') {
+      ctx.filter = 'blur(8px) brightness(0.9)'; coverDraw(ctx, img, x, y, w, h); ctx.filter = 'none';
+      containDraw(ctx, img, x, y, w, h);
+    } else {
+      coverDraw(ctx, img, x, y, w, h);
+    }
+    ctx.restore();
+  }
+}
+
+// ───────────────────────── trim (multi-segment keep) ─────────────────────────
+// Mark keep-windows (A→B) on a timeline; everything OUTSIDE them is cut at
+// render and the kept parts stitched. Arbitrary number of windows. Sent as
+// keep_segments in the render body (renderer does select/aselect at the end).
+const TRIM_MIN = 0.2;
+
+function wireTrim() {
+  els.trimVideo = $('#trim-video');
+  if (!els.trimVideo) return;
+  const v = els.trimVideo;
+  v.addEventListener('loadedmetadata', () => {
+    const scr = $('#trim-scrubber'); if (scr) scr.max = v.duration || 0;
+    const d = $('#trim-dur'); if (d) d.textContent = formatTime(v.duration || 0);
+    renderTrimTrack();
+  });
+  v.addEventListener('timeupdate', () => {
+    const t = $('#trim-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
+    const scr = $('#trim-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
+    updateTrimCursor();
+  });
+  v.addEventListener('play', () => { const b = $('#trim-play'); if (b) b.textContent = '❚❚'; });
+  v.addEventListener('pause', () => { const b = $('#trim-play'); if (b) b.textContent = '▶'; });
+  $('#trim-play').addEventListener('click', () => { if (v.paused) v.play(); else v.pause(); });
+  $('#trim-scrubber').addEventListener('input', (e) => { if (v.duration) v.currentTime = +e.target.value; });
+  $('#btn-trim-a').addEventListener('click', setKeepA);
+  $('#btn-trim-b').addEventListener('click', setKeepB);
+  $('#btn-trim-here').addEventListener('click', addKeepHere);
+  $('#btn-trim-clear').addEventListener('click', () => { state.keep = []; state.keepA = null; renderTrimTrack(); renderTrimList(); setStatus('trim-status', 'Cleared — keeps the whole clip.', 'ok'); });
+  $('#trim-track').addEventListener('mousedown', onTrimTrackDown);
+  window.addEventListener('mousemove', onTrimDragMove);
+  window.addEventListener('mouseup', () => { if (state.keepDrag) { state.keepDrag = null; renderTrimList(); } });
+}
+
+function trimDur() {
+  return (els.trimVideo && els.trimVideo.duration) ? els.trimVideo.duration
+    : (state.source ? state.source.duration : 0) || 0;
+}
+
+function initTrimStep() {
+  if (!state.source || !els.trimVideo) return;
+  const v = els.trimVideo;
+  if (v.dataset.path !== state.source.video_path) {
+    v.dataset.path = state.source.video_path;
+    v.src = state.source.video_path;
+  }
+  renderTrimTrack();
+  renderTrimList();
+}
+
+function addKeep(a, b) {
+  const dur = trimDur() || 0;
+  a = Math.max(0, a);
+  if (dur) b = Math.min(b, dur);
+  if (b - a < TRIM_MIN) { setStatus('trim-status', 'Window too short.', 'err'); return false; }
+  state.keep.push({ start: +a.toFixed(2), end: +b.toFixed(2) });
+  state.keep.sort((x, y) => x.start - y.start);
+  renderTrimTrack(); renderTrimList();
+  return true;
+}
+
+function setKeepA() {
+  state.keepA = els.trimVideo ? (els.trimVideo.currentTime || 0) : 0;
+  setStatus('trim-status', `A (in) = ${state.keepA.toFixed(2)}s — now scrub to the end and hit "Set B".`, 'ok');
+}
+
+function setKeepB() {
+  if (state.keepA == null) { setStatus('trim-status', 'Set A (in) first.', 'err'); return; }
+  const b = els.trimVideo ? (els.trimVideo.currentTime || 0) : 0;
+  if (addKeep(state.keepA, b)) {
+    setStatus('trim-status', `Kept ${state.keepA.toFixed(1)}–${b.toFixed(1)}s.`, 'ok');
+    state.keepA = null;
+  }
+}
+
+function addKeepHere() {
+  const t = els.trimVideo ? (els.trimVideo.currentTime || 0) : 0;
+  addKeep(t, t + 3);
+}
+
+function keptTotal() {
+  return state.keep.reduce((s, w) => s + (w.end - w.start), 0);
+}
+
+function renderTrimTrack() {
+  const track = $('#trim-track');
+  const kept = $('#trim-kept');
+  if (kept) {
+    const dur = trimDur();
+    kept.textContent = state.keep.length
+      ? `keeps ${keptTotal().toFixed(1)}s of ${dur ? dur.toFixed(1) : '?'}s (${state.keep.length} window${state.keep.length > 1 ? 's' : ''})`
+      : 'keeps whole clip';
+  }
+  if (!track) return;
+  const dur = trimDur() || 1;
+  track.innerHTML = state.keep.map((w, i) => {
+    const left = (w.start / dur) * 100;
+    const width = Math.max(1, ((w.end - w.start) / dur) * 100);
+    return `<div class="trim-block" data-i="${i}" style="left:${left}%;width:${width}%" title="${w.start.toFixed(1)}–${w.end.toFixed(1)}s — drag to move, right edge to resize">
+      <span class="trim-block-lbl">${(w.end - w.start).toFixed(1)}s</span>
+      <span class="trim-block-handle"></span>
+    </div>`;
+  }).join('') + '<div class="ill-cursor" id="trim-cursor"></div>';
+  updateTrimCursor();
+}
+
+function updateTrimCursor() {
+  const cur = $('#trim-cursor');
+  if (!cur) return;
+  const dur = trimDur() || 1;
+  cur.style.left = ((els.trimVideo ? (els.trimVideo.currentTime || 0) : 0) / dur) * 100 + '%';
+}
+
+function onTrimTrackDown(e) {
+  const block = e.target.closest('.trim-block');
+  if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  const rect = $('#trim-track').getBoundingClientRect();
+  const onHandle = e.target.classList.contains('trim-block-handle')
+    || (block.getBoundingClientRect().right - e.clientX) < 10;
+  state.keepDrag = { i, mode: onHandle ? 'resize' : 'move', startX: e.clientX, trackW: rect.width,
+                     a: state.keep[i].start, b: state.keep[i].end };
+}
+
+function onTrimDragMove(e) {
+  const d = state.keepDrag;
+  if (!d) return;
+  const dur = trimDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const w = state.keep[d.i];
+  if (!w) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    let ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    w.start = +ns.toFixed(2); w.end = +(ns + len).toFixed(2);
+  } else {
+    let ne = Math.max(w.start + TRIM_MIN, Math.min(d.b + dt, dur));
+    w.end = +ne.toFixed(2);
+  }
+  renderTrimTrack();
+}
+
+function renderTrimList() {
+  const ol = $('#trim-list');
+  if (!ol) return;
+  if (!state.keep.length) {
+    ol.innerHTML = '<li class="empty">No windows — the whole clip is kept. Mark A→B to cut out the rest.</li>';
+    return;
+  }
+  ol.innerHTML = state.keep.map((w, i) => `
+    <li>
+      <span class="sfx-it-name">Keep ${i + 1}</span>
+      <span class="ill-it-when">${w.start.toFixed(1)} → ${w.end.toFixed(1)}s · ${(w.end - w.start).toFixed(1)}s</span>
+      <button class="ill-it-seek" data-seek="${i}" title="seek to its start">▶</button>
+      <button class="ill-it-del danger" data-del="${i}" title="remove window">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
+    const w = state.keep[+b.dataset.seek]; if (w && els.trimVideo) els.trimVideo.currentTime = w.start;
+  }));
+  ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
+    state.keep.splice(+b.dataset.del, 1); renderTrimTrack(); renderTrimList();
   }));
 }

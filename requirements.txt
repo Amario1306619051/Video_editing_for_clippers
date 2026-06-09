@@ -15,3 +15,4 @@ python-multipart>=0.0.9
 secretstorage>=3.3     # Linux only — needed to read Chrome cookie store
 openai>=1.0            # client for the vision-LM endpoint (AI auto-box); optional feature
 requests>=2.0
+piper-tts  # local TTS for the intro-card voiceover (download a voice into clipper/voices/)

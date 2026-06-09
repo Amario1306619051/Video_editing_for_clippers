@@ -16,6 +16,7 @@ import renderer
 import soundboard
 import thumbnail
 import transcriber
+import tts
 import vision
 from models import (
     DownloadRequest, DownloadResponse,
@@ -113,6 +114,8 @@ def api_render(req: RenderRequest):
             render_end=req.render_end,
             sfx=req.sfx,
             illustrations=req.illustrations,
+            keep_segments=req.keep_segments,
+            intro=req.intro,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -173,7 +176,7 @@ def api_capabilities():
     dependency — the vision model (AI auto-box) and the text model (thumbnail
     headline ideas)."""
     return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled(),
-            "pexels": pexels.enabled()}
+            "pexels": pexels.enabled(), "tts": tts.enabled()}
 
 
 @app.post("/api/cleanup")
@@ -256,6 +259,37 @@ def api_search(req: SearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"candidates": candidates}
+
+
+@app.post("/api/intro-image")
+async def api_intro_image(request: Request, job_id: str):
+    """Upload the composed thumbnail PNG (raw body) to temp/{job_id}_intro.png so
+    the render can prepend it as the intro card. Cleaned with the job."""
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty image")
+    try:
+        downloader.get_source_path(job_id)  # validates the job exists
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    (TEMP_DIR / f"{job_id}_intro.png").write_bytes(data)
+    return {"ok": True}
+
+
+@app.get("/api/img")
+def api_img(url: str):
+    """Same-origin proxy for a Pexels image so the Thumbnail canvas isn't tainted
+    (a cross-origin image would make canvas.toBlob throw). Pexels hosts only."""
+    import requests
+    from fastapi import Response
+    if not (url.startswith("https://images.pexels.com/") or url.startswith("https://www.pexels.com/")):
+        raise HTTPException(status_code=400, detail="only Pexels image URLs allowed")
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return Response(content=r.content, media_type=r.headers.get("content-type", "image/jpeg"))
 
 
 @app.get("/api/soundboard")

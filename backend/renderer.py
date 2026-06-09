@@ -7,7 +7,15 @@ from typing import Optional
 
 import pexels
 import soundboard
-from models import IllustrationPick, Keyframe, SfxPlacement, Word
+import tts
+from models import IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word
+
+TEMP_DIR = Path(__file__).resolve().parent.parent / "temp"
+
+# Valid ffmpeg xfade transition names we expose (+ 'cut' = plain concat).
+_XFADE_OK = {"fade", "fadeblack", "fadewhite", "dissolve", "slideleft", "slideright",
+             "slideup", "slidedown", "circleopen", "circleclose", "zoomin",
+             "wipeleft", "wiperight", "pixelize", "radial"}
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -333,6 +341,28 @@ def _shift_sfx(sfx: list[SfxPlacement], start: float, end: Optional[float]) -> l
     return out
 
 
+def _sanitize_keep(segs, dur: float):
+    """Normalize KeepSegment list → sorted, clamped, merged (a,b) tuples. Drops
+    sub-frame slivers and overlaps. Empty result = no trim (keep whole clip)."""
+    raw = []
+    for s in segs or []:
+        a = float(getattr(s, "start", 0.0))
+        b = float(getattr(s, "end", 0.0))
+        a = max(0.0, a)
+        if dur and dur > 0:
+            b = min(b, dur)
+        if b - a > 0.02:
+            raw.append((a, b))
+    raw.sort()
+    merged: list[tuple[float, float]] = []
+    for a, b in raw:
+        if merged and a <= merged[-1][1] + 0.001:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
 def _shift_illustrations(picks, start, end):
     """Re-base full-frame cutaway windows onto the render sub-range, dropping or
     clipping windows outside [start, end]. Mirrors illustrator's helper."""
@@ -353,7 +383,9 @@ def _shift_illustrations(picks, start, end):
             ne = min(ne, end - start)
         if ne <= ns:
             continue
-        out.append(IllustrationPick(t_start=ns, t_end=ne, url=p.url))
+        out.append(IllustrationPick(t_start=ns, t_end=ne, url=p.url,
+                                    target=getattr(p, "target", "full") or "full",
+                                    fit=getattr(p, "fit", "cover") or "cover"))
     return out
 
 
@@ -716,6 +748,71 @@ def _clamp_kfs(kfs: Optional[list[Keyframe]], w: int, h: int) -> Optional[list[K
 
 # ───────────────────────── main render ─────────────────────────
 
+def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
+    """Second pass: prepend the intro card (temp/{job}_intro.png) — shown for
+    `intro.duration`s with a Piper voiceover of `intro.text` — then transition
+    into `main_path`. Replaces main_path in place. No-op if the image is missing."""
+    intro_png = TEMP_DIR / f"{job_id}_intro.png"
+    if not intro_png.exists():
+        return main_path
+
+    # Voiceover (optional, best-effort).
+    voice_wav = None
+    if getattr(intro, "voice", True) and (intro.text or "").strip() and tts.enabled():
+        cand = TEMP_DIR / f"{job_id}_intro.wav"
+        try:
+            tts.synthesize(intro.text, cand)
+            voice_wav = cand
+        except Exception as e:  # noqa: BLE001
+            print(f"[RENDER] TTS failed (intro stays silent): {e}")
+
+    vdur = _probe_duration(voice_wav) if voice_wav else 0.0
+    intro_dur = max(float(intro.duration or 4.0), (vdur + 0.4) if vdur else 0.0, 1.0)
+    main_dur = _probe_duration(main_path) or 1.0
+    main_has_audio = _probe_has_audio(main_path)
+    trans = (intro.transition or "fade")
+    if trans != "cut" and trans not in _XFADE_OK:
+        trans = "fade"
+    xf = 0.0 if trans == "cut" else min(0.6, intro_dur * 0.5, main_dur * 0.5)
+
+    inputs = ["-loop", "1", "-t", f"{intro_dur:.3f}", "-i", str(intro_png)]
+    if voice_wav:
+        inputs += ["-i", str(voice_wav)]
+    inputs += ["-i", str(main_path)]
+    main_idx = 2 if voice_wav else 1
+
+    af = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+    p: list[str] = []
+    p.append(f"[0:v]scale={OUT_W}:{OUT_H},setsar=1,fps=30,format=yuv420p[iv]")
+    p.append(f"[{main_idx}:v]scale={OUT_W}:{OUT_H},setsar=1,fps=30,format=yuv420p[mv]")
+    if voice_wav:
+        p.append(f"[1:a]aresample=48000,apad=whole_dur={intro_dur:.3f},atrim=0:{intro_dur:.3f},{af}[ia]")
+    else:
+        p.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:{intro_dur:.3f},{af}[ia]")
+    if main_has_audio:
+        p.append(f"[{main_idx}:a]aresample=48000,{af}[ma]")
+    else:
+        p.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:{main_dur:.3f},{af}[ma]")
+    if trans == "cut":
+        p.append("[iv][mv]concat=n=2:v=1:a=0[v]")
+        p.append("[ia][ma]concat=n=2:v=0:a=1[a]")
+    else:
+        p.append(f"[iv][mv]xfade=transition={trans}:duration={xf:.3f}:offset={max(0.0, intro_dur - xf):.3f}[v]")
+        p.append(f"[ia][ma]acrossfade=d={xf:.3f}[a]")
+
+    tmp_out = TEMP_DIR / f"{job_id}_final.mp4"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           *(["-hwaccel", "cuda"] if _detect_encoder() == "h264_nvenc" else []),
+           *inputs, "-filter_complex", ";".join(p),
+           "-map", "[v]", "-map", "[a]", *_encode_args(),
+           "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp_out)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"intro pass failed:\n{proc.stderr}")
+    tmp_out.replace(main_path)
+    return main_path
+
+
 def render(
     job_id: str,
     source_path: Path,
@@ -729,9 +826,18 @@ def render(
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
     illustrations: Optional[list[IllustrationPick]] = None,
+    keep_segments: Optional[list[KeepSegment]] = None,
+    intro: Optional[IntroConfig] = None,
 ) -> dict:
     if not box1 and not box2:
         raise ValueError("at least one of box1/box2 must be provided")
+
+    # Multi-segment KEEP trim (drop the gaps). Probe duration once for clamping +
+    # the SFX silent-base. When keep windows are set they OVERRIDE the single
+    # render sub-range: the whole clip is composed (so crop/caption/SFX/cutaway
+    # stay correct), then `select`/`aselect` drops everything outside the windows.
+    src_dur = _probe_duration(source_path)
+    keep = _sanitize_keep(keep_segments, src_dur)
 
     # Normalize sub-range. Both sides optional. Invalid range = ignored.
     rs = max(0.0, float(render_start)) if render_start is not None else 0.0
@@ -739,6 +845,8 @@ def render(
     if re_ is not None and re_ <= rs:
         re_ = None
         rs = 0.0  # ignore — user passed nonsense
+    if keep:
+        rs, re_ = 0.0, None  # keep-trim handles all trimming; ignore the sub-range
 
     # Re-base keyframes and words to the sub-range so t=0 in filtergraph
     # aligns with rs. Done BEFORE building filter expressions.
@@ -838,13 +946,31 @@ def render(
     # before/after via eof_action=pass). Input 0 = video; images are inputs 1..N.
     for i, (_p, pick) in enumerate(img_inputs):
         in_idx = i + 1
-        parts.append(
-            f"[{in_idx}:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUT_W}:{OUT_H},setsar=1[ill{i}]"
-        )
+        tgt = getattr(pick, "target", "full") or "full"
+        if tgt == "box1":      # top slot
+            W, H, x, y = OUT_W, TOP_H, 0, 0
+        elif tgt == "box2":    # bottom slot
+            W, H, x, y = OUT_W, BOTTOM_H, 0, TOP_H
+        else:                  # full frame
+            W, H, x, y = OUT_W, OUT_H, 0, 0
+        if (getattr(pick, "fit", "cover") or "cover") == "blur":
+            # contained image + blurred-cover pad filling the target rect
+            parts.append(
+                f"[{in_idx}:v]split=2[ia{i}][ib{i}];"
+                f"[ia{i}]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                f"gblur=sigma=30:steps=2,eq=brightness=-0.08[ibg{i}];"
+                f"[ib{i}]scale={W}:{H}:force_original_aspect_ratio=decrease,setsar=1[ifg{i}];"
+                f"[ibg{i}][ifg{i}]overlay=(W-w)/2:(H-h)/2[ill{i}]"
+            )
+        else:                  # cover: scale-cover + crop to the target rect
+            parts.append(
+                f"[{in_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},setsar=1[ill{i}]"
+            )
         nxt = f"bil{i}"
         parts.append(
-            f"[{last}][ill{i}]overlay=enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
+            f"[{last}][ill{i}]overlay=x={x}:y={y}:"
+            f"enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
         )
         last = nxt
 
@@ -861,13 +987,25 @@ def render(
 
     # Soundboard SFX → audio mix (only when sounds are placed; otherwise the
     # plain optional source-audio mapping is kept, i.e. zero change).
-    src_dur = _probe_duration(source_path)
+    has_audio = _probe_has_audio(source_path)
     out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
     sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
-        sfx, _probe_has_audio(source_path), out_dur, first_sfx_index=1 + len(img_inputs))
+        sfx, has_audio, out_dur, first_sfx_index=1 + len(img_inputs))
     if sfx_parts:
         parts.extend(sfx_parts)
     audio_map = amap or "0:a?"
+
+    # Multi-segment KEEP trim — applied at the very END so all the time-based
+    # composition above (crop / caption / SFX / cutaway) stays correct; then the
+    # gaps are dropped and the kept windows concatenated (select/aselect re-time).
+    if keep:
+        kexpr = "+".join(f"between(t,{_fmt_num(a)},{_fmt_num(b)})" for a, b in keep)
+        parts.append(f"{vmap}select='{kexpr}',setpts=N/FRAME_RATE/TB[vtrim]")
+        vmap = "[vtrim]"
+        abase = amap or ("[0:a]" if has_audio else None)
+        if abase:
+            parts.append(f"{abase}aselect='{kexpr}',asetpts=N/SR/TB[atrim]")
+            audio_map = "[atrim]"
 
     filter_complex = ";".join(parts)
 
@@ -928,6 +1066,14 @@ def render(
         ass_path.unlink()
     except OSError:
         pass
+
+    # Optional intro card (thumbnail + voiceover + transition) prepended in a
+    # second pass — best-effort: a failure keeps the plain render.
+    if intro is not None:
+        try:
+            _prepend_intro(output_path, job_id, intro)
+        except Exception as e:  # noqa: BLE001
+            print(f"[RENDER] intro prepend failed (kept main render): {e}")
 
     return {
         "output_path": f"/output/{filename}",

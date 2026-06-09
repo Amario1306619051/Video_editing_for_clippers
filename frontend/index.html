@@ -18,10 +18,11 @@
   <nav class="steps">
     <button class="step active" data-step="1"><span>01</span> Source</button>
     <button class="step" data-step="2"><span>02</span> Position</button>
-    <button class="step" data-step="3"><span>03</span> Render</button>
-    <button class="step" data-step="4"><span>04</span> Thumbnail</button>
-    <button class="step" data-step="5"><span>05</span> Sound</button>
-    <button class="step" data-step="6"><span>06</span> Illustration</button>
+    <button class="step" data-step="5"><span>03</span> Sound</button>
+    <button class="step" data-step="6"><span>04</span> Illustration</button>
+    <button class="step" data-step="7"><span>05</span> Trim</button>
+    <button class="step" data-step="3"><span>06</span> Render</button>
+    <button class="step" data-step="4"><span>07</span> Thumbnail</button>
   </nav>
 </header>
 
@@ -257,6 +258,26 @@
           </label>
         </div>
 
+        <div class="intro-controls">
+          <label class="intro-toggle"><input type="checkbox" id="rd-intro"> Add intro card (from Thumbnail)</label>
+          <div class="intro-opts" id="rd-intro-opts">
+            <label><span>Transition</span>
+              <select id="rd-intro-trans">
+                <option value="fade">Crossfade</option>
+                <option value="dissolve">Dissolve</option>
+                <option value="zoomin">Zoom in</option>
+                <option value="slideleft">Slide left</option>
+                <option value="slideup">Slide up</option>
+                <option value="circleopen">Circle</option>
+                <option value="cut">Cut (none)</option>
+              </select>
+            </label>
+            <label><span>Min duration (s)</span><input type="number" id="rd-intro-dur" value="4" min="1" max="15" step="0.5"></label>
+            <label class="intro-check"><input type="checkbox" id="rd-intro-voice" checked> 🔊 Voiceover reads the headline</label>
+          </div>
+          <div class="hint">Set up your <b>Thumbnail (Step 7)</b> first — that image becomes the intro card and its headline is what the voice reads. The intro is prepended at render.</div>
+        </div>
+
         <div class="words-box hidden" id="words-box">
           <div class="muted">No transcript yet.</div>
         </div>
@@ -269,7 +290,7 @@
     </div>
 
     <div class="actions">
-      <button class="ghost" data-go="2">← Back</button>
+      <button class="ghost" data-go="7">← Back</button>
       <button id="btn-render" class="primary">Render Final (with Caption) →</button>
       <button id="btn-render-nocap" class="ghost" title="skip Whisper, fast preview">Quick preview (no caption)</button>
       <span class="status" id="rd-status"></span>
@@ -310,63 +331,45 @@
           <input type="range" id="thumb-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
           <span class="time-dur" id="thumb-dur">0:00.0</span>
         </div>
-        <div class="thumb-focus">
-          <label>Focus ↔ <input type="range" id="thumb-pan" min="0" max="100" value="50"></label>
-          <label>Focus ↕ <input type="range" id="thumb-pany" min="0" max="100" value="50"></label>
+        <div class="hint">Scrub to a moment, then hit <b>Capture</b> on a box that's set to Scene. Each box can capture from a different time.</div>
+        <div class="actions">
+          <button id="btn-thumb-dl" class="primary">↓ Download PNG (1080×1920)</button>
+          <span class="status" id="thumb-status"></span>
         </div>
       </div>
 
       <aside class="thumb-controls">
-        <div class="thumb-gen">
-          <button id="btn-thumb-gen" class="primary">✨ Generate headline ideas</button>
+        <div class="thumb-sec">
+          <div class="thumb-sec-head">Background</div>
+          <div class="thumb-seg" id="thumb-layout-toggle">
+            <button class="seg" data-layout="full">Full (1 box)</button>
+            <button class="seg" data-layout="two">2 boxes</button>
+          </div>
+          <div id="thumb-slots"></div>
+        </div>
+
+        <div class="thumb-sec">
+          <div class="thumb-sec-head">Headline</div>
+          <button id="btn-thumb-gen" class="primary">✨ Generate ideas</button>
           <span class="status" id="thumb-gen-status"></span>
           <div class="thumb-ideas" id="thumb-ideas"></div>
-        </div>
-
-        <label class="full">
-          <span>Headline text</span>
-          <textarea id="thumb-text" rows="3" placeholder="Type, or pick a generated idea above. Enter = new line."></textarea>
-        </label>
-
-        <div class="thumb-opts">
-          <label>
-            <span>Font</span>
-            <select id="thumb-font">
-              <option>Anton</option>
-              <option>Bebas Neue</option>
-              <option>Bricolage Grotesque</option>
-              <option>JetBrains Mono</option>
-              <option>Impact</option>
-              <option>Arial</option>
-            </select>
-          </label>
-          <label>
-            <span>Size</span>
-            <input type="number" id="thumb-size" value="130" min="20" max="400" step="2">
-          </label>
-          <label>
-            <span>Position</span>
-            <select id="thumb-pos">
-              <option value="top">Top</option>
-              <option value="middle">Middle</option>
-              <option value="bottom" selected>Bottom</option>
-            </select>
-          </label>
-          <label>
-            <span>Text</span>
-            <input type="color" id="thumb-color" value="#ffffff">
-          </label>
-          <label>
-            <span>Outline</span>
-            <input type="color" id="thumb-stroke" value="#000000">
-          </label>
-          <label class="thumb-check"><input type="checkbox" id="thumb-upper" checked> UPPERCASE</label>
-          <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
-        </div>
-
-        <div class="actions">
-          <button id="btn-thumb-dl" class="primary">↓ Download PNG (1080×1920)</button>
-          <span class="status" id="thumb-status"></span>
+          <textarea id="thumb-text" rows="2" placeholder="Type, or pick a generated idea. Enter = new line."></textarea>
+          <div class="thumb-opts">
+            <label><span>Font</span>
+              <select id="thumb-font">
+                <option>Anton</option><option>Bebas Neue</option><option>Bricolage Grotesque</option>
+                <option>JetBrains Mono</option><option>Impact</option><option>Arial</option>
+              </select>
+            </label>
+            <label><span>Size</span><input type="number" id="thumb-size" value="130" min="20" max="400" step="2"></label>
+            <label><span>Position</span>
+              <select id="thumb-pos"><option value="top">Top</option><option value="middle">Middle</option><option value="bottom" selected>Bottom</option></select>
+            </label>
+            <label><span>Text</span><input type="color" id="thumb-color" value="#ffffff"></label>
+            <label><span>Outline</span><input type="color" id="thumb-stroke" value="#000000"></label>
+            <label class="thumb-check"><input type="checkbox" id="thumb-upper" checked> UPPERCASE</label>
+            <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
+          </div>
         </div>
       </aside>
     </div>
@@ -432,7 +435,7 @@
     </div>
 
     <div class="actions">
-      <button class="ghost" data-go="3">← Back to Render</button>
+      <button class="ghost" data-go="2">← Back</button>
     </div>
   </section>
 
@@ -440,13 +443,21 @@
   <section class="panel hidden" id="panel-6">
     <div class="panel-head">
       <h1>Illustration</h1>
-      <p>Search Pexels and drop <b>full-frame cutaways</b> onto the clip — the image fills the whole 9:16 frame for its window. Place several, drag to move, set each duration. Mixed in when you <b>Render</b> (Step 3).</p>
+      <p>Search Pexels and drop <b>image cutaways</b> onto the clip — fill the whole frame, or just <b>Box 1 (top)</b> / <b>Box 2 (bottom)</b>, with <b>cover</b> or <b>blur</b> fit. Place several, drag to move, set each duration. Preview on the right; mixed in when you <b>Render</b>.</p>
     </div>
 
     <div class="ill-layout">
       <div class="ill-left">
+        <div class="ill-stage-row">
+          <div class="ill-stage">
+            <video id="ill-video" playsinline></video>
+          </div>
+          <div class="ill-preview-wrap">
+            <div class="ill-preview-label">Preview</div>
+            <canvas id="ill-preview" width="180" height="320"></canvas>
+          </div>
+        </div>
         <div class="ill-stage">
-          <video id="ill-video" playsinline></video>
           <div class="ill-scrub">
             <button class="ctrl-btn" id="ill-play" title="Play/Pause">▶</button>
             <span class="time-cur" id="ill-time">0:00.0</span>
@@ -478,7 +489,45 @@
     </div>
 
     <div class="actions">
-      <button class="ghost" data-go="3">← Back to Render</button>
+      <button class="ghost" data-go="5">← Back</button>
+    </div>
+  </section>
+
+  <!-- STEP 7: TRIM (multi-segment keep) -->
+  <section class="panel hidden" id="panel-7">
+    <div class="panel-head">
+      <h1>Trim</h1>
+      <p>Mark the windows you want to <b>keep</b> (A → B). Everything outside your windows is cut at render and the kept parts are stitched together — handy for removing dead air / noisy stretches. Add as many windows as you want. Applied when you <b>Render</b> (Step 3).</p>
+    </div>
+
+    <div class="trim-layout">
+      <div class="trim-stage">
+        <video id="trim-video" playsinline></video>
+        <div class="trim-scrub">
+          <button class="ctrl-btn" id="trim-play" title="Play/Pause">▶</button>
+          <span class="time-cur" id="trim-time">0:00.0</span>
+          <input type="range" id="trim-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+          <span class="time-dur" id="trim-dur">0:00.0</span>
+        </div>
+        <div class="trim-controls">
+          <button class="ghost" id="btn-trim-a">◖ Set A (in)</button>
+          <button class="ghost" id="btn-trim-b">Set B (out) ◗</button>
+          <button class="primary" id="btn-trim-here">+ keep ~3s here</button>
+          <button class="ghost small" id="btn-trim-clear" title="remove all windows">clear</button>
+          <span class="status" id="trim-status"></span>
+        </div>
+      </div>
+
+      <div class="trim-track-wrap">
+        <div class="sfx-sub-head">Kept windows — drag to move, right edge to resize · <span id="trim-kept">keeps whole clip</span></div>
+        <div class="trim-track" id="trim-track" title="green = kept, dim = cut"></div>
+      </div>
+
+      <ol class="ill-list" id="trim-list"></ol>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" data-go="6">← Back</button>
     </div>
   </section>
 
