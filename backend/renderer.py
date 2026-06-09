@@ -5,8 +5,9 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import pexels
 import soundboard
-from models import Keyframe, SfxPlacement, Word
+from models import IllustrationPick, Keyframe, SfxPlacement, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -329,6 +330,30 @@ def _shift_sfx(sfx: list[SfxPlacement], start: float, end: Optional[float]) -> l
             if t < start or (end is not None and t >= end):
                 continue
             out.append(s.model_copy(update={"t": t - start}))
+    return out
+
+
+def _shift_illustrations(picks, start, end):
+    """Re-base full-frame cutaway windows onto the render sub-range, dropping or
+    clipping windows outside [start, end]. Mirrors illustrator's helper."""
+    if not picks:
+        return picks or []
+    if (not start or start <= 0) and end is None:
+        return picks
+    start = max(0.0, start or 0.0)
+    out = []
+    for p in picks:
+        if end is not None and p.t_start >= end:
+            continue
+        if p.t_end <= start:
+            continue
+        ns = max(0.0, p.t_start - start)
+        ne = p.t_end - start
+        if end is not None:
+            ne = min(ne, end - start)
+        if ne <= ns:
+            continue
+        out.append(IllustrationPick(t_start=ns, t_end=ne, url=p.url))
     return out
 
 
@@ -703,6 +728,7 @@ def render(
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
+    illustrations: Optional[list[IllustrationPick]] = None,
 ) -> dict:
     if not box1 and not box2:
         raise ValueError("at least one of box1/box2 must be provided")
@@ -724,6 +750,7 @@ def render(
         if words:
             words = _shift_words(words, rs, re_)
         sfx = _shift_sfx(sfx, rs, re_)
+        illustrations = _shift_illustrations(illustrations, rs, re_)
 
     # Defense-in-depth: clamp boxes inside the actual source frame (no-op for
     # valid boxes; prevents an off-frame crop from crashing ffmpeg).
@@ -761,6 +788,17 @@ def render(
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
+    # Download ONLY the picked illustration images (deduped by URL). Each is a
+    # full-frame 9:16 cutaway overlaid on the composite during its window.
+    img_inputs: list[tuple[Path, IllustrationPick]] = []
+    _seen: dict[str, Path] = {}
+    for p in sorted(illustrations or [], key=lambda x: x.t_start):
+        if not p.url:
+            continue
+        if p.url not in _seen:
+            _seen[p.url] = pexels.download_pick(job_id, p.url)
+        img_inputs.append((_seen[p.url], p))
+
     # Build filter_complex.
     # Single-box mode fills the entire 1080×1920 frame (full focus on that box).
     # Two-box mode uses the 3/8 + 5/8 vstack split.
@@ -795,6 +833,21 @@ def render(
         parts.extend(_crop_chain("0:v", box2, OUT_W, OUT_H, "stacked"))
         last = "stacked"
 
+    # Full-frame illustration cutaways: overlay each picked image over the WHOLE
+    # composite during its [t_start,t_end] window (the video shows through
+    # before/after via eof_action=pass). Input 0 = video; images are inputs 1..N.
+    for i, (_p, pick) in enumerate(img_inputs):
+        in_idx = i + 1
+        parts.append(
+            f"[{in_idx}:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUT_W}:{OUT_H},setsar=1[ill{i}]"
+        )
+        nxt = f"bil{i}"
+        parts.append(
+            f"[{last}][ill{i}]overlay=enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
+        )
+        last = nxt
+
     # Subtitle path escape — Windows drive letters break filter parsing
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
     fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
@@ -811,7 +864,7 @@ def render(
     src_dur = _probe_duration(source_path)
     out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
     sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
-        sfx, _probe_has_audio(source_path), out_dur, first_sfx_index=1)
+        sfx, _probe_has_audio(source_path), out_dur, first_sfx_index=1 + len(img_inputs))
     if sfx_parts:
         parts.extend(sfx_parts)
     audio_map = amap or "0:a?"
@@ -836,6 +889,16 @@ def render(
     if _detect_encoder() == "h264_nvenc":
         hwaccel = ["-hwaccel", "cuda"]
 
+    # Each picked image is fed ONLY for its own window (-itsoffset start + -t
+    # window) at a low framerate — it's a still. Matches illustrator; ~cheap.
+    # These inputs are 1..N; SFX inputs (built above with first_sfx_index=1+N)
+    # come after them, so the cmd order is: source, images, sfx.
+    ill_inputs: list[str] = []
+    for _p, pick in img_inputs:
+        win = max(0.1, float(pick.t_end) - float(pick.t_start))
+        ill_inputs += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
+                       "-framerate", "2", "-t", f"{win:.3f}", "-i", str(_p)]
+
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         # Thread hints for the filter graph (the per-frame crop expression +
@@ -846,6 +909,7 @@ def render(
         *hwaccel,
         *input_seek,
         "-i", str(source_path),
+        *ill_inputs,
         *sfx_inputs,
         "-filter_complex", filter_complex,
         "-map", vmap,

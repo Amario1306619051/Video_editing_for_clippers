@@ -6,6 +6,14 @@ See also the "Roadmap (priority order)" section in `CLAUDE.md` for the existing 
 
 ---
 
+## Illustration cutaways (Pexels, manual) — DONE (2026-06)
+
+**Status:** ✅ shipped (clipper Step 6 "Illustration").
+
+Search Pexels → drop **full-frame 9:16 cutaways** onto the clip (the image fills the whole frame for its window). Place several, **drag to move** + **resize duration** on a mini-timeline. Unlike illustrator's auto bottom-slot illustrations, placement is fully manual. Picked images downloaded only at render (deduped, cleaned with the job); overlaid via `overlay=enable=between(t,…)` before the caption burn. Needs `PEXELS_API_KEY` in `clipper/.env` (same key as illustrator). See CLAUDE.md "Illustration cutaways". `pexels.py`. Not wired into the batch-queue auto-render.
+
+---
+
 ## Soundboard / sound effects — DONE (2026-06)
 
 **Status:** ✅ shipped in both projects (clipper Step 5, illustrator Step 6).

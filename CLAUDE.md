@@ -73,9 +73,10 @@ clipper/
 │   ├── thumbnail.py     Text-LLM client: context → eye-catching headline ideas; self-loads .env
 │   ├── batchqueue.py    Persistent batch queue + background worker (JSON import → download + auto-box)
 │   ├── soundboard.py    Persistent SFX library (SQLite + audio files); renderer mixes placements into the audio
+│   ├── pexels.py        Pexels image search + download (for the illustration cutaways); self-loads .env
 │   └── models.py        Pydantic request/response schemas
 ├── frontend/
-│   ├── index.html       5 panels (source/position/render/thumbnail/sound) + batch-queue sidebar, step nav
+│   ├── index.html       6 panels (source/position/render/thumbnail/sound/illustration) + batch-queue sidebar, step nav
 │   ├── style.css        Dark editorial theme, CSS vars in :root
 │   └── app.js           Canvas drawing, aspect-locked drag, API calls
 ├── temp/                Source videos. Auto-deleted after render.
@@ -109,9 +110,12 @@ All under `/api/`. Bodies are JSON, responses are JSON.
 | POST   | `/api/soundboard/{id}` | `{name?, volume?}`             | updated sound (rename / default volume) |
 | DELETE | `/api/soundboard/{id}` | —                              | `{ok}` (delete sound + its file) |
 | GET    | `/api/soundboard/{id}/audio` | —                        | the audio file (preview playback) |
-| GET    | `/api/capabilities` | —                                 | `{vision: bool, thumbnail: bool}` (auto-box / headline ideas available) |
+| POST   | `/api/search`    | `{query}`                            | `{candidates: [{id,thumb,full,alt,photographer}]}` (Pexels image search) |
+| GET    | `/api/capabilities` | —                                 | `{vision, thumbnail, pexels}` (auto-box / headline ideas / illustration search available) |
 
-`RenderRequest` carries an optional `sfx: [{sound_id, kind('oneshot'|'range'), t, t_end?, volume, loop}]` — soundboard placements mixed into the audio at render (see the "Soundboard / SFX" gotcha).
+`RenderRequest` carries two optional overlay lists:
+- `sfx: [{sound_id, kind('oneshot'|'range'), t, t_end?, volume, loop}]` — soundboard placements mixed into the audio (see "Soundboard / SFX").
+- `illustrations: [{t_start, t_end, url}]` — full-frame Pexels image cutaways over a window (see "Illustration cutaways").
 | POST   | `/api/cleanup`   | `{job_id}`                           | `{ok: true}`                                 |
 | GET    | `/temp/{name}`   | —                                    | mp4 stream (for browser preview)             |
 | GET    | `/output/{name}` | —                                    | mp4 download                                 |
@@ -274,6 +278,13 @@ A persistent library of imported sound-effect files + per-clip placements mixed 
 - **Placement** is per-clip, NOT persisted (it rides in `RenderRequest.sfx`). Two kinds: `oneshot` (plays once at `t`) and `range` (plays over `[t, t_end]`, `loop` repeats it to fill). Each has a linear `volume`. The frontend Step 5 (`#sfx-*`, `state.sfx`) has its own `#sfx-video` scrubber to pick times; placements reset per clip (`doDownload` / `openQueueJob`).
 - **Renderer audio graph** (`_audio_inputs_and_graph`, identical in both renderers): builds ONLY when `sfx` is non-empty — otherwise the plain `-map 0:a?` is untouched (zero regression for normal renders). Each SFX = one extra ffmpeg input after the source (clipper) / after the source+image inputs (illustrator: `first_sfx_index = 1 + len(img_inputs)`). Base = the clip's own audio (or `anullsrc`+`atrim` silence, bounded to the output duration, when the source has none). Each input is `volume`'d, `aformat`'d to a common 48k/stereo/fltp, range ones `atrim`'d to their window, delayed with `adelay={ms}:all=1`, then `amix=inputs=N:normalize=0:duration=first` (normalize=0 keeps levels so the user balances via volume; duration=first bounds it to the base). Looping a range uses **`-stream_loop -1` on that input** (demux level), not an `aloop` filter. SFX times are re-based to a render sub-range via `_shift_sfx` (mirrors `_shift_keyframes`/`_shift_words`).
 - The batch-queue auto-render path does NOT add SFX (placements aren't stored on a job) — SFX are an interactive-render feature. Don't wire SFX into the queue without asking.
+
+### Illustration cutaways (Step 6) — `pexels.py` + renderer overlay
+Manual **full-frame 9:16 cutaways** from Pexels images, placed on a mini-timeline (drag to move, drag the right edge to resize duration). NOT illustrator's auto bottom-slot — here the user controls each one.
+- **Search = `pexels.py`** (ported from illustrator's `search_pexels`/`download_pick`; self-loads `.env`, reads `PEXELS_API_KEY` — the SAME key as illustrator). `/api/search {query}` → candidate URLs (streamed to the browser, nothing stored). Gated: `/api/capabilities.pexels` is false when the key is unset → the search UI is disabled (a manual render with no illustrations still works). **Needs `PEXELS_API_KEY` in `clipper/.env`** (was added empty — paste the key).
+- **Placement** is per-clip, NOT persisted — it rides in `RenderRequest.illustrations` (`[{t_start, t_end, url}]`). Frontend Step 6 (`#ill-*`, `state.ills`) has its own `#ill-video` scrubber + a draggable timeline track; reset per clip (`doDownload` / `openQueueJob`).
+- **Renderer** (`render()` in `renderer.py`): only the picked images are downloaded (`pexels.download_pick`, deduped, into `temp/{job}_ill_*.jpg`, cleaned by `cleanup_job`'s `{job}*` glob). Each is an input fed only for its window (`-itsoffset start -loop 1 -framerate 2 -t win`), `scale=cover→crop` to 1080×1920, and overlaid on the whole composite with `overlay=enable='between(t,t0,t1)':eof_action=pass` **before** the subtitle burn (so captions stay on top of cutaways). Re-based to a render sub-range via `_shift_illustrations` (mirrors illustrator).
+- **Input ordering is load-bearing:** inputs are `source(0)`, then illustration images `1..N`, then SFX `N+1..` — so the SFX audio graph uses `first_sfx_index = 1 + len(img_inputs)`. If you add more inputs, keep the image→sfx order and update both index bases.
 
 ### State persistence — only the batch queue
 The ad-hoc (single-clip) flow is still **stateless**: restarting the server loses an in-flight ad-hoc job (the frontend forgets its `job_id`). That's intentional. The **only** thing persisted to disk is the batch queue (the SQLite DB `queue/queue.db`, see above) — the owner asked for resumable batch progress. Don't broaden persistence beyond the queue (no server DB, no persisting the ad-hoc flow) without asking.

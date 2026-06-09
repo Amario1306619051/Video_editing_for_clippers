@@ -21,6 +21,7 @@
     <button class="step" data-step="3"><span>03</span> Render</button>
     <button class="step" data-step="4"><span>04</span> Thumbnail</button>
     <button class="step" data-step="5"><span>05</span> Sound</button>
+    <button class="step" data-step="6"><span>06</span> Illustration</button>
   </nav>
 </header>
 
@@ -427,6 +428,52 @@
         </div>
 
         <div class="hint">Click a pad = <b>preview</b>. <b>＋ here</b> drops a one-shot at the current time. For a background bed, pick a sound + range above. Adjust each placement's volume in the list to balance against the clip audio.</div>
+      </aside>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" data-go="3">← Back to Render</button>
+    </div>
+  </section>
+
+  <!-- STEP 6: ILLUSTRATION (full-frame cutaways) -->
+  <section class="panel hidden" id="panel-6">
+    <div class="panel-head">
+      <h1>Illustration</h1>
+      <p>Search Pexels and drop <b>full-frame cutaways</b> onto the clip — the image fills the whole 9:16 frame for its window. Place several, drag to move, set each duration. Mixed in when you <b>Render</b> (Step 3).</p>
+    </div>
+
+    <div class="ill-layout">
+      <div class="ill-left">
+        <div class="ill-stage">
+          <video id="ill-video" playsinline></video>
+          <div class="ill-scrub">
+            <button class="ctrl-btn" id="ill-play" title="Play/Pause">▶</button>
+            <span class="time-cur" id="ill-time">0:00.0</span>
+            <input type="range" id="ill-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+            <span class="time-dur" id="ill-dur">0:00.0</span>
+          </div>
+        </div>
+
+        <div class="ill-track-wrap">
+          <div class="sfx-sub-head">Timeline — drag a block to move, drag its right edge to resize <span class="kf-count" id="ill-count">0</span></div>
+          <div class="ill-track" id="ill-track" title="cutaway windows across the clip"></div>
+        </div>
+
+        <ol class="ill-list" id="ill-list"></ol>
+      </div>
+
+      <aside class="ill-right">
+        <div class="ill-search">
+          <div class="ill-search-row">
+            <input type="text" id="ill-query" placeholder="search Pexels — e.g. money, city night, sad cat">
+            <button class="primary" id="btn-ill-search">Search</button>
+          </div>
+          <label class="ill-defdur">default duration <input type="number" id="ill-defdur" value="3" min="0.5" max="30" step="0.5"> s</label>
+          <span class="status" id="ill-status"></span>
+        </div>
+        <div class="ill-candidates" id="ill-candidates"></div>
+        <div class="hint">Type a query → <b>Search</b> → click an image to drop a cutaway at the current time (with the default duration). Then drag it on the timeline / change its duration in the list.</div>
       </aside>
     </div>
 

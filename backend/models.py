@@ -73,6 +73,33 @@ CAPTION_FONTS = [
 ]
 
 
+class Candidate(BaseModel):
+    """One Pexels stock-photo option. `thumb` is shown in the UI (loaded from the
+    Pexels CDN — never stored). `full` is downloaded only if picked, at render."""
+    id: str
+    thumb: str
+    full: str
+    alt: str = ""
+    photographer: str = ""
+
+
+class SearchRequest(BaseModel):
+    query: str
+
+
+class SearchResponse(BaseModel):
+    candidates: list[Candidate] = Field(default_factory=list)
+
+
+class IllustrationPick(BaseModel):
+    """A picked image shown FULL-FRAME (9:16 cutaway) over [t_start, t_end].
+    Times are clip-relative (re-based to a render sub-range). `url` is the
+    picked candidate's `full` URL — downloaded at render, deduped by URL."""
+    t_start: float
+    t_end: float
+    url: str
+
+
 class SfxPlacement(BaseModel):
     """A soundboard sound placed onto the clip.
       - kind 'oneshot' — plays once starting at `t` (seconds, clip time).
@@ -112,6 +139,8 @@ class RenderRequest(BaseModel):
     render_end: Optional[float] = None
     # Soundboard sound effects mixed into the audio (one-shot + range/loop).
     sfx: list[SfxPlacement] = Field(default_factory=list)
+    # Full-frame illustration cutaways (Pexels images over a time window).
+    illustrations: list[IllustrationPick] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):

@@ -1010,3 +1010,42 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .muted { color: var(--text-mute); font-size: 12px; }
 
 @media (max-width: 900px) { .sfx-layout { grid-template-columns: 1fr; } }
+
+/* ───────────────────────── illustration step ───────────────────────── */
+.ill-layout { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 24px; align-items: start; }
+.ill-left { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.ill-stage { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
+#ill-video { width: 100%; height: auto; max-height: 46vh; display: block; background: #000; border-radius: 4px; }
+.ill-scrub { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.ill-scrub .scrubber { flex: 1; }
+
+.ill-track-wrap { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.ill-track { position: relative; height: 46px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; user-select: none; }
+.ill-block { position: absolute; top: 3px; bottom: 3px; background: rgba(232,255,58,.14); border: 1px solid var(--accent); border-radius: 3px; overflow: hidden; cursor: grab; min-width: 14px; }
+.ill-block img { height: 100%; width: 100%; object-fit: cover; opacity: .65; pointer-events: none; }
+.ill-block-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 8px; background: var(--accent); cursor: ew-resize; opacity: .7; }
+.ill-cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; z-index: 5; }
+
+.ill-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ill-list li { display: flex; align-items: center; gap: 10px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; }
+.ill-list li.empty { color: var(--text-mute); justify-content: center; border-style: dashed; }
+.ill-it-thumb { width: 32px; height: 44px; object-fit: cover; border-radius: 3px; }
+.ill-it-when { font-size: 12px; color: var(--text-dim); flex: 1; font-variant-numeric: tabular-nums; }
+.ill-it-dur { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }
+.ill-it-dur input { width: 64px; }
+.ill-it-seek, .ill-it-del { border: none; background: transparent; padding: 2px 6px; color: var(--text-mute); }
+.ill-it-seek:hover { color: var(--accent); }
+.ill-it-del:hover { color: var(--danger); }
+
+.ill-right { display: flex; flex-direction: column; gap: 12px; }
+.ill-search { display: flex; flex-direction: column; gap: 8px; }
+.ill-search-row { display: flex; gap: 8px; }
+.ill-search-row input { flex: 1; min-width: 0; }
+.ill-defdur { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+.ill-defdur input { width: 64px; }
+.ill-candidates { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; max-height: 46vh; overflow-y: auto; }
+.ill-cand { padding: 0; border: 1px solid var(--border-strong); border-radius: 4px; overflow: hidden; aspect-ratio: 2/3; background: var(--bg-elev-2); }
+.ill-cand img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ill-cand:hover { border-color: var(--accent); }
+
+@media (max-width: 900px) { .ill-layout { grid-template-columns: 1fr; } .ill-candidates { grid-template-columns: repeat(4,1fr); } }

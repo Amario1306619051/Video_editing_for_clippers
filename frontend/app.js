@@ -41,6 +41,8 @@ const state = {
   sounds: [],                             // soundboard library (from /api/soundboard)
   sfx: [],                                // SFX placements for this clip (sent at render)
   sfxPreview: null,                       // currently-playing preview Audio
+  ills: [],                               // full-frame illustration cutaways {url,thumb,t_start,t_end}
+  illDrag: null,                          // {i, mode:'move'|'resize', ...} while dragging a block
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -198,6 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireThumb();
   wireQueue();
   wireSfx();
+  wireIll();
   updatePills();
   initCapabilities();
 });
@@ -217,6 +220,12 @@ async function initCapabilities() {
       if (g) g.disabled = true;
       setStatus('thumb-gen-status', 'AI ideas are off — no text model configured. You can still type your own headline.', 'err');
     }
+    if (!caps.pexels) {
+      const b = $('#btn-ill-search'), q = $('#ill-query');
+      if (b) b.disabled = true;
+      if (q) q.disabled = true;
+      setStatus('ill-status', 'Illustration search is off — set PEXELS_API_KEY in clipper/.env (same key as illustrator).', 'err');
+    }
   } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
 }
 
@@ -227,12 +236,13 @@ function canGoToStep(n) {
   if (n === 3) return !!state.jobId;
   if (n === 4) return !!state.jobId;
   if (n === 5) return !!state.jobId;
+  if (n === 6) return !!state.jobId;
   return false;
 }
 
 function showStep(n) {
   state.step = n;
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 6; i++) {
     $(`#panel-${i}`).classList.toggle('hidden', i !== n);
   }
   document.querySelectorAll('.steps .step').forEach(b => {
@@ -256,6 +266,9 @@ function showStep(n) {
   }
   if (n === 5) {
     requestAnimationFrame(initSfxStep);
+  }
+  if (n === 6) {
+    requestAnimationFrame(initIllStep);
   }
 }
 
@@ -1364,6 +1377,7 @@ async function doDownload() {
     state.renderRange = { start: null, end: null };
     state.autoRange = { start: 0, end: res.duration };
     state.sfx = [];                // placements are per-clip
+    state.ills = [];               // cutaways are per-clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
     updateRangeMeta();
@@ -1469,6 +1483,7 @@ function buildRenderBody(withWords) {
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
     sfx: state.sfx,
+    illustrations: state.ills.map(c => ({ t_start: c.t_start, t_end: c.t_end, url: c.url })),
   };
   logBoxes(body);
   return body;
@@ -1953,6 +1968,7 @@ async function openQueueJob(key) {
   state.currentTime = 0;
   state.words = [];
   state.sfx = [];                  // placements are per-clip
+  state.ills = [];                 // cutaways are per-clip
   state.renderRange = { start: null, end: null };
   state.autoRange = { start: 0, end: job.duration };
   // Reflect the job in the Step 1 form + prefill the auto-box prompts so a
@@ -2223,5 +2239,190 @@ function renderSfxList() {
   }));
   ol.querySelectorAll('.sfx-it-del').forEach(b => b.addEventListener('click', () => {
     state.sfx.splice(+b.dataset.del, 1); renderSfxList();
+  }));
+}
+
+// ───────────────────────── illustration cutaways (Pexels) ─────────────────────────
+// Search Pexels → click an image to drop a FULL-FRAME cutaway at the current
+// time. Cutaways live on a mini-timeline: drag a block to move it, drag its
+// right edge to resize (duration). Sent in the render body → renderer overlays
+// each image over the whole 9:16 frame during its window.
+const ILL_MIN_DUR = 0.3;
+
+function wireIll() {
+  els.illVideo = $('#ill-video');
+  if (!els.illVideo) return;
+  const v = els.illVideo;
+  v.addEventListener('loadedmetadata', () => {
+    const scr = $('#ill-scrubber'); if (scr) scr.max = v.duration || 0;
+    const d = $('#ill-dur'); if (d) d.textContent = formatTime(v.duration || 0);
+    renderIllTrack();
+  });
+  v.addEventListener('timeupdate', () => {
+    const t = $('#ill-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
+    const scr = $('#ill-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
+    updateIllCursor();
+  });
+  v.addEventListener('play', () => { const b = $('#ill-play'); if (b) b.textContent = '❚❚'; });
+  v.addEventListener('pause', () => { const b = $('#ill-play'); if (b) b.textContent = '▶'; });
+  $('#ill-play').addEventListener('click', () => { if (v.paused) v.play(); else v.pause(); });
+  $('#ill-scrubber').addEventListener('input', (e) => { if (v.duration) v.currentTime = +e.target.value; });
+  $('#btn-ill-search').addEventListener('click', doIllSearch);
+  $('#ill-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') doIllSearch(); });
+  $('#ill-track').addEventListener('mousedown', onIllTrackDown);
+  window.addEventListener('mousemove', onIllDragMove);
+  window.addEventListener('mouseup', () => { if (state.illDrag) { state.illDrag = null; renderIllList(); } });
+}
+
+function illDur() {
+  return (els.illVideo && els.illVideo.duration) ? els.illVideo.duration
+    : (state.source ? state.source.duration : 0) || 0;
+}
+
+function initIllStep() {
+  if (!state.source || !els.illVideo) return;
+  const v = els.illVideo;
+  if (v.dataset.path !== state.source.video_path) {
+    v.dataset.path = state.source.video_path;
+    v.src = state.source.video_path;
+  }
+  if (!$('#ill-query').value && $('#f-title').value && $('#f-title').value.toLowerCase() !== 'clip') {
+    $('#ill-query').value = $('#f-title').value.trim();
+  }
+  renderIllTrack();
+  renderIllList();
+}
+
+async function doIllSearch() {
+  const q = ($('#ill-query').value || '').trim();
+  if (!q) { setStatus('ill-status', 'Type something to search.', 'err'); return; }
+  const btn = $('#btn-ill-search');
+  if (btn) btn.disabled = true;
+  setStatus('ill-status', `Searching "${q}"…`);
+  try {
+    const res = await apiPost('/api/search', { query: q });
+    renderIllCandidates(res.candidates || []);
+    setStatus('ill-status', (res.candidates || []).length ? 'Click an image to drop a cutaway at the current time.' : 'No results.', (res.candidates || []).length ? 'ok' : 'err');
+  } catch (e) {
+    setStatus('ill-status', 'Search failed: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderIllCandidates(cands) {
+  const box = $('#ill-candidates');
+  if (!box) return;
+  box.innerHTML = cands.map(c => `
+    <button class="ill-cand" data-url="${escapeHtml(c.full)}" data-thumb="${escapeHtml(c.thumb)}" title="${escapeHtml(c.alt || '')} — ${escapeHtml(c.photographer || '')}">
+      <img src="${escapeHtml(c.thumb)}" loading="lazy" alt="">
+    </button>`).join('');
+  box.querySelectorAll('.ill-cand').forEach(b => b.addEventListener('click', () => addCutaway(b.dataset.url, b.dataset.thumb)));
+}
+
+function addCutaway(url, thumb) {
+  const dur = illDur();
+  const t = els.illVideo ? (els.illVideo.currentTime || 0) : 0;
+  const defd = Math.max(ILL_MIN_DUR, parseFloat($('#ill-defdur').value) || 3);
+  let t_end = t + defd;
+  if (dur && t_end > dur) t_end = dur;
+  if (t_end - t < ILL_MIN_DUR) { setStatus('ill-status', 'Too close to the end — scrub earlier.', 'err'); return; }
+  state.ills.push({ url, thumb, t_start: +t.toFixed(2), t_end: +t_end.toFixed(2) });
+  state.ills.sort((a, b) => a.t_start - b.t_start);
+  renderIllTrack();
+  renderIllList();
+  setStatus('ill-status', `Cutaway added ${t.toFixed(1)}–${t_end.toFixed(1)}s.`, 'ok');
+}
+
+function renderIllTrack() {
+  const track = $('#ill-track');
+  const count = $('#ill-count');
+  if (count) count.textContent = state.ills.length;
+  if (!track) return;
+  const dur = illDur() || 1;
+  track.innerHTML = state.ills.map((c, i) => {
+    const left = (c.t_start / dur) * 100;
+    const width = Math.max(1.5, ((c.t_end - c.t_start) / dur) * 100);
+    return `<div class="ill-block" data-i="${i}" style="left:${left}%;width:${width}%" title="${c.t_start.toFixed(1)}–${c.t_end.toFixed(1)}s — drag to move, right edge to resize">
+      <img src="${escapeHtml(c.thumb)}" alt="">
+      <span class="ill-block-handle"></span>
+    </div>`;
+  }).join('') + '<div class="ill-cursor" id="ill-cursor"></div>';
+  updateIllCursor();
+}
+
+function updateIllCursor() {
+  const cur = $('#ill-cursor');
+  if (!cur) return;
+  const dur = illDur() || 1;
+  const t = els.illVideo ? (els.illVideo.currentTime || 0) : 0;
+  cur.style.left = (t / dur) * 100 + '%';
+}
+
+function onIllTrackDown(e) {
+  const block = e.target.closest('.ill-block');
+  if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  const rect = $('#ill-track').getBoundingClientRect();
+  const onHandle = e.target.classList.contains('ill-block-handle')
+    || (block.getBoundingClientRect().right - e.clientX) < 10;
+  state.illDrag = {
+    i, mode: onHandle ? 'resize' : 'move',
+    startX: e.clientX, trackW: rect.width,
+    t0: state.ills[i].t_start, t1: state.ills[i].t_end,
+  };
+}
+
+function onIllDragMove(e) {
+  const d = state.illDrag;
+  if (!d) return;
+  const dur = illDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const c = state.ills[d.i];
+  if (!c) return;
+  if (d.mode === 'move') {
+    const len = d.t1 - d.t0;
+    let ns = d.t0 + dt;
+    ns = Math.max(0, Math.min(ns, dur - len));
+    c.t_start = +ns.toFixed(2);
+    c.t_end = +(ns + len).toFixed(2);
+  } else {
+    let ne = d.t1 + dt;
+    ne = Math.max(c.t_start + ILL_MIN_DUR, Math.min(ne, dur));
+    c.t_end = +ne.toFixed(2);
+  }
+  renderIllTrack();
+}
+
+function renderIllList() {
+  const ol = $('#ill-list');
+  if (!ol) return;
+  if (!state.ills.length) {
+    ol.innerHTML = '<li class="empty">No cutaways yet — search, then click an image.</li>';
+    return;
+  }
+  ol.innerHTML = state.ills.map((c, i) => `
+    <li>
+      <img class="ill-it-thumb" src="${escapeHtml(c.thumb)}" alt="">
+      <span class="ill-it-when">${c.t_start.toFixed(1)}–${c.t_end.toFixed(1)}s</span>
+      <span class="ill-it-dur">dur <input type="number" class="ill-dur-in" data-i="${i}" min="0.3" step="0.5" value="${(c.t_end - c.t_start).toFixed(1)}"> s</span>
+      <button class="ill-it-seek" data-seek="${i}" title="seek to its start">▶</button>
+      <button class="ill-it-del danger" data-del="${i}" title="remove cutaway">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.ill-dur-in').forEach(inp => inp.addEventListener('change', (e) => {
+    const i = +e.target.dataset.i;
+    const dur = illDur() || 1;
+    let len = Math.max(ILL_MIN_DUR, parseFloat(e.target.value) || ILL_MIN_DUR);
+    const c = state.ills[i];
+    if (c.t_start + len > dur) len = dur - c.t_start;
+    c.t_end = +(c.t_start + len).toFixed(2);
+    renderIllTrack(); renderIllList();
+  }));
+  ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
+    const c = state.ills[+b.dataset.seek]; if (c && els.illVideo) els.illVideo.currentTime = c.t_start;
+  }));
+  ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
+    state.ills.splice(+b.dataset.del, 1); renderIllTrack(); renderIllList();
   }));
 }

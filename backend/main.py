@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import autobox
 import batchqueue as batch_queue
 import downloader
+import pexels
 import renderer
 import soundboard
 import thumbnail
@@ -25,6 +26,7 @@ from models import (
     ThumbnailTextRequest, ThumbnailTextResponse,
     QueueImportRequest, QueueJobPatch,
     SoundPatch,
+    SearchRequest, SearchResponse,
     Word,
 )
 
@@ -110,6 +112,7 @@ def api_render(req: RenderRequest):
             render_start=req.render_start,
             render_end=req.render_end,
             sfx=req.sfx,
+            illustrations=req.illustrations,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -169,7 +172,8 @@ def api_capabilities():
     """Lets the frontend hide/disable features that need an optional backend
     dependency — the vision model (AI auto-box) and the text model (thumbnail
     headline ideas)."""
-    return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled()}
+    return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled(),
+            "pexels": pexels.enabled()}
 
 
 @app.post("/api/cleanup")
@@ -244,6 +248,16 @@ def api_queue_delete(key: str):
 
 
 # ───────────────────────── soundboard ─────────────────────────
+@app.post("/api/search", response_model=SearchResponse)
+def api_search(req: SearchRequest):
+    """Pexels image search for the manual illustration cutaways (Step Illustration)."""
+    try:
+        candidates = pexels.search(req.query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"candidates": candidates}
+
+
 @app.get("/api/soundboard")
 def api_sb_list():
     """The persistent SFX library (id, name, duration, default volume)."""
