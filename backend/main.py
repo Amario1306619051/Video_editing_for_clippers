@@ -36,7 +36,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 app = FastAPI(title="CLIPPER")
 
 # Start the batch-queue worker: it downloads + auto-boxes queued clips one at a
-# time in the background, resuming from queue/queue.json across restarts.
+# time in the background, resuming from the SQLite db queue/queue.db across restarts.
 batch_queue.start_worker()
 
 
