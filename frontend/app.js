@@ -36,6 +36,8 @@ const state = {
   abDrag: null,                          // 'start' | 'end' while dragging a range handle
   autoRange: { start: 0, end: null },    // AI auto-box time range (null end = clip end)
   result: null,
+  activeQueueKey: null,                   // batch-queue job currently loaded (null = ad-hoc)
+  queueSig: null,                         // signature of last auto-saved queue state
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -190,6 +192,8 @@ document.addEventListener('DOMContentLoaded', () => {
     redrawPreview(els.preview2);
   });
 
+  wireThumb();
+  wireQueue();
   updatePills();
   initCapabilities();
 });
@@ -204,7 +208,12 @@ async function initCapabilities() {
       document.querySelectorAll('.ab-gen, #ab-prompt-1, #ab-prompt-2').forEach(el => { el.disabled = true; });
       setStatus('ab-status', 'AI auto-box is off — no vision model configured (set VISION_BASE_URL / VISION_MODEL in .env).', 'err');
     }
-  } catch (e) { /* capabilities are best-effort; manual boxing still works */ }
+    if (!caps.thumbnail) {
+      const g = $('#btn-thumb-gen');
+      if (g) g.disabled = true;
+      setStatus('thumb-gen-status', 'AI ideas are off — no text model configured. You can still type your own headline.', 'err');
+    }
+  } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
 }
 
 // ───────────────────────── step nav ─────────────────────────
@@ -212,12 +221,13 @@ function canGoToStep(n) {
   if (n === 1) return true;
   if (n === 2) return !!state.jobId;
   if (n === 3) return !!state.jobId;
+  if (n === 4) return !!state.jobId;
   return false;
 }
 
 function showStep(n) {
   state.step = n;
-  for (let i = 1; i <= 3; i++) {
+  for (let i = 1; i <= 4; i++) {
     $(`#panel-${i}`).classList.toggle('hidden', i !== n);
   }
   document.querySelectorAll('.steps .step').forEach(b => {
@@ -235,6 +245,9 @@ function showStep(n) {
   if (n === 3) {
     renderWordChips();
     redrawPreview(els.preview2);
+  }
+  if (n === 4) {
+    requestAnimationFrame(initThumbStep);
   }
 }
 
@@ -1342,6 +1355,7 @@ async function doDownload() {
     state.words = [];
     state.renderRange = { start: null, end: null };
     state.autoRange = { start: 0, end: res.duration };
+    state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
     updateRangeMeta();
     setActiveBox(null);
@@ -1574,5 +1588,442 @@ async function doDone() {
     setStatus('rd-status', 'Cleanup failed: ' + e.message, 'err');
   } finally {
     btn.disabled = false;
+  }
+}
+
+// ───────────────────────── thumbnail generator ─────────────────────────
+// A dedicated 9:16 cover maker. Pick a frame on its own scrubber, generate an
+// eye-catching headline (LLM) or type your own, then export a 1080×1920 PNG.
+// Everything (frame capture, compositing, export) is client-side canvas — the
+// only backend call is /api/thumbnail-text for the suggested wording.
+const thumb = {
+  text: '',
+  font: 'Anton',
+  size: 130,         // headline size in OUTPUT (1080-wide) pixels
+  color: '#ffffff',
+  stroke: '#000000',
+  pos: 'bottom',     // top | middle | bottom
+  upper: true,
+  shade: true,
+  panX: 0.5,         // horizontal focus of the cover crop (0..1)
+  panY: 0.5,         // vertical focus
+};
+
+function wireThumb() {
+  els.thumbVideo = $('#thumb-video');
+  els.thumbCanvas = $('#thumb-canvas');
+  if (!els.thumbCanvas) return;
+  const v = els.thumbVideo;
+
+  v.addEventListener('loadedmetadata', () => {
+    const dur = v.duration || 0;
+    const scr = $('#thumb-scrubber');
+    if (scr) scr.max = dur;
+    const d = $('#thumb-dur'); if (d) d.textContent = formatTime(dur);
+    drawThumb();
+  });
+  v.addEventListener('loadeddata', drawThumb);   // first frame decoded → paint it
+  v.addEventListener('seeked', drawThumb);
+  v.addEventListener('timeupdate', () => {
+    const t = $('#thumb-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
+  });
+
+  $('#thumb-scrubber').addEventListener('input', (e) => {
+    if (!v.duration) return;
+    v.currentTime = +e.target.value;
+    const t = $('#thumb-time'); if (t) t.textContent = formatTime(+e.target.value);
+  });
+
+  $('#thumb-text').addEventListener('input', (e) => { thumb.text = e.target.value; drawThumb(); });
+  $('#thumb-font').addEventListener('change', (e) => {
+    thumb.font = e.target.value;
+    // wait for the webfont so the preview uses the real glyphs, not a fallback
+    document.fonts.load(`bold 120px "${thumb.font}"`).then(drawThumb).catch(drawThumb);
+  });
+  $('#thumb-size').addEventListener('input', (e) => { thumb.size = +e.target.value || 130; drawThumb(); });
+  $('#thumb-color').addEventListener('input', (e) => { thumb.color = e.target.value; drawThumb(); });
+  $('#thumb-stroke').addEventListener('input', (e) => { thumb.stroke = e.target.value; drawThumb(); });
+  $('#thumb-pos').addEventListener('change', (e) => { thumb.pos = e.target.value; drawThumb(); });
+  $('#thumb-upper').addEventListener('change', (e) => { thumb.upper = e.target.checked; drawThumb(); });
+  $('#thumb-shade').addEventListener('change', (e) => { thumb.shade = e.target.checked; drawThumb(); });
+  $('#thumb-pan').addEventListener('input', (e) => { thumb.panX = (+e.target.value) / 100; drawThumb(); });
+  $('#thumb-pany').addEventListener('input', (e) => { thumb.panY = (+e.target.value) / 100; drawThumb(); });
+  $('#btn-thumb-gen').addEventListener('click', doThumbGen);
+  $('#btn-thumb-dl').addEventListener('click', downloadThumb);
+}
+
+function initThumbStep() {
+  if (!state.source || !els.thumbVideo) return;
+  const v = els.thumbVideo;
+  // (Re)point at the current source — a fresh download changes the path.
+  if (v.dataset.path !== state.source.video_path) {
+    v.dataset.path = state.source.video_path;
+    v.src = state.source.video_path;
+  }
+  // Seed the text from the title once (if the user left it default/empty).
+  const ta = $('#thumb-text');
+  if (ta && !ta.value) {
+    const t = ($('#f-title').value || '').trim();
+    if (t && t.toLowerCase() !== 'clip') { ta.value = t; thumb.text = t; }
+  }
+  drawThumb();
+}
+
+// Draw the preview at the canvas' display resolution (405×720).
+function drawThumb() {
+  const c = els.thumbCanvas;
+  if (!c) return;
+  drawThumbnailInto(c.getContext('2d'), c.width, c.height);
+}
+
+// Parametric so the same code renders the preview AND the 1080×1920 export.
+function drawThumbnailInto(ctx, W, H) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  drawThumbBg(ctx, W, H);
+  if (thumb.shade) drawThumbShade(ctx, W, H);
+  drawThumbText(ctx, W, H);
+}
+
+// Cover-fit the picked frame into 9:16, positioned by the focus sliders.
+function drawThumbBg(ctx, W, H) {
+  const v = els.thumbVideo;
+  const vw = v ? v.videoWidth : 0;
+  const vh = v ? v.videoHeight : 0;
+  if (!vw || !vh) return;
+  const dstAR = W / H, srcAR = vw / vh;
+  let sw, sh, sx, sy;
+  if (srcAR > dstAR) {            // source wider → crop left/right
+    sh = vh; sw = vh * dstAR; sy = 0; sx = (vw - sw) * thumb.panX;
+  } else {                        // source taller → crop top/bottom
+    sw = vw; sh = vw / dstAR; sx = 0; sy = (vh - sh) * thumb.panY;
+  }
+  try { ctx.drawImage(v, sx, sy, sw, sh, 0, 0, W, H); } catch (_) {}
+}
+
+// Dark gradient behind the text band so any footage stays readable.
+function drawThumbShade(ctx, W, H) {
+  ctx.save();
+  let g;
+  if (thumb.pos === 'top') {
+    g = ctx.createLinearGradient(0, 0, 0, H * 0.5);
+    g.addColorStop(0, 'rgba(0,0,0,0.7)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * 0.5);
+  } else if (thumb.pos === 'bottom') {
+    g = ctx.createLinearGradient(0, H, 0, H * 0.5);
+    g.addColorStop(0, 'rgba(0,0,0,0.7)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, H * 0.5, W, H * 0.5);
+  } else {
+    g = ctx.createLinearGradient(0, H * 0.28, 0, H * 0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.5, 'rgba(0,0,0,0.6)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, H * 0.28, W, H * 0.44);
+  }
+  ctx.restore();
+}
+
+function wrapThumbLines(ctx, text, maxW) {
+  const out = [];
+  for (const para of text.split('\n')) {
+    const words = para.split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    let cur = words[0];
+    for (let i = 1; i < words.length; i++) {
+      const test = cur + ' ' + words[i];
+      if (ctx.measureText(test).width > maxW) { out.push(cur); cur = words[i]; }
+      else cur = test;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+function drawThumbText(ctx, W, H) {
+  let text = (thumb.text || '').trim();
+  if (!text) return;
+  if (thumb.upper) text = text.toUpperCase();
+  const scale = W / OUT_W;                       // OUT_W = 1080 (output width)
+  const fontPx = Math.max(8, thumb.size * scale);
+  const lineH = fontPx * 1.08;
+  const maxW = W * 0.9;
+
+  ctx.save();
+  ctx.font = `bold ${fontPx}px "${thumb.font}", Impact, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+
+  const lines = wrapThumbLines(ctx, text, maxW);
+  const blockH = lines.length * lineH;
+  const margin = H * 0.06;
+  let cy;
+  if (thumb.pos === 'top') cy = margin + lineH / 2;
+  else if (thumb.pos === 'bottom') cy = H - margin - blockH + lineH / 2;
+  else cy = H / 2 - blockH / 2 + lineH / 2;
+
+  ctx.lineWidth = Math.max(2, fontPx * 0.14);
+  ctx.strokeStyle = thumb.stroke;
+  ctx.fillStyle = thumb.color;
+  for (const line of lines) {
+    ctx.strokeText(line, W / 2, cy);
+    ctx.fillText(line, W / 2, cy);
+    cy += lineH;
+  }
+  ctx.restore();
+}
+
+async function doThumbGen() {
+  const btn = $('#btn-thumb-gen');
+  const context = [
+    ($('#f-title').value || '').trim(),
+    ($('#f-desc').value || '').trim(),
+    (state.words || []).map(w => w.word).join(' ').trim(),
+  ].filter(Boolean).join('\n');
+  if (btn) btn.disabled = true;
+  setStatus('thumb-gen-status', 'Generating headline ideas… (first call may warm the model)');
+  try {
+    const res = await apiPost('/api/thumbnail-text', { context, n: 6 });
+    const titles = res.titles || [];
+    renderThumbIdeas(titles);
+    setStatus('thumb-gen-status',
+      titles.length ? `${titles.length} ideas — click one to use it, then tweak` : 'No ideas returned',
+      titles.length ? 'ok' : 'err');
+  } catch (e) {
+    setStatus('thumb-gen-status', 'Failed: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderThumbIdeas(titles) {
+  const box = $('#thumb-ideas');
+  if (!box) return;
+  box.innerHTML = titles
+    .map(t => `<button class="thumb-idea" type="button">${escapeHtml(t)}</button>`)
+    .join('');
+  box.querySelectorAll('.thumb-idea').forEach(b => b.addEventListener('click', () => {
+    const ta = $('#thumb-text');
+    if (ta) ta.value = b.textContent;
+    thumb.text = b.textContent;
+    drawThumb();
+  }));
+}
+
+async function downloadThumb() {
+  // Make sure the chosen webfont is ready before rasterizing at full res.
+  try { await document.fonts.load(`bold ${thumb.size}px "${thumb.font}"`); } catch (_) {}
+  const off = document.createElement('canvas');
+  off.width = OUT_W; off.height = OUT_H;        // 1080×1920
+  drawThumbnailInto(off.getContext('2d'), OUT_W, OUT_H);
+  off.toBlob((blob) => {
+    if (!blob) { setStatus('thumb-status', 'Export failed', 'err'); return; }
+    const a = document.createElement('a');
+    const title = ($('#f-title').value.trim() || 'clip').replace(/[^\w.-]+/g, '_');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${title}_thumbnail.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    setStatus('thumb-status', `Saved ${a.download}`, 'ok');
+  }, 'image/png');
+}
+
+// ───────────────────────── batch queue (sidebar) ─────────────────────────
+// Upload a JSON of clips → the backend worker downloads + auto-boxes each one in
+// the background (persisted across restarts). The sidebar lists jobs by id; open
+// a ready one to fine-tune the boxes (auto-saved back to the job), delete when done.
+function wireQueue() {
+  const btn = $('#btn-queue-import');
+  const file = $('#queue-file');
+  if (!btn || !file) return;
+  btn.addEventListener('click', () => file.click());
+  file.addEventListener('change', async () => {
+    const f = file.files[0];
+    if (!f) return;
+    const text = await f.text();
+    file.value = '';
+    setStatus('queue-status', 'Importing…');
+    try {
+      const res = await apiPost('/api/queue/import', { content: text });
+      setStatus('queue-status',
+        `Added ${res.added}, skipped ${res.skipped} (already queued). Working in the background…`, 'ok');
+      refreshQueue();
+    } catch (e) {
+      setStatus('queue-status', 'Import failed: ' + e.message, 'err');
+    }
+  });
+  const all = $('#btn-queue-render-all');
+  if (all) all.addEventListener('click', renderAllReady);
+  refreshQueue();
+  setInterval(refreshQueue, 3000);   // live status while the worker churns
+  setInterval(autosaveQueue, 5000);  // persist box edits on the active job
+}
+
+async function refreshQueue() {
+  try {
+    const r = await fetch('/api/queue');
+    if (!r.ok) return;
+    const data = await r.json();
+    renderQueueList(data.jobs || []);
+  } catch (e) { /* sidebar is best-effort */ }
+}
+
+function statusBadge(s) {
+  const label = {
+    pending: 'queued', downloading: 'downloading', predicting: 'boxing',
+    ready: 'ready', render_queued: 'render queued', rendering: 'rendering',
+    done: 'done', error: 'error',
+  }[s] || s;
+  return `<span class="q-badge ${s}">${label}</span>`;
+}
+
+function renderQueueList(jobs) {
+  const ul = $('#queue-list');
+  const meta = $('#queue-meta');
+  if (!ul) return;
+  if (!jobs.length) {
+    ul.innerHTML = '';
+    if (meta) meta.textContent = 'No jobs queued.';
+    return;
+  }
+  const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
+  const working = (c.pending || 0) + (c.downloading || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
+  if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  ul.innerHTML = jobs.map(j => {
+    const active = j.key === state.activeQueueKey ? ' active' : '';
+    const canOpen = j.status === 'ready' || j.status === 'done';
+    const kf = canOpen ? ` · ${j.kf1}+${j.kf2} kf` : '';
+    const renderBtn = canOpen
+      ? `<button class="q-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'transcribe + render this clip (queued, runs in background)'}">▶</button>`
+      : '';
+    const dl = (j.status === 'done' && j.output_path)
+      ? `<a class="q-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>`
+      : '';
+    const retry = j.status === 'error' ? `<button class="q-retry" data-key="${j.key}" title="retry this job">↻</button>` : '';
+    return `<li class="queue-item${active}" data-status="${j.status}">
+      <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${escapeHtml(j.message || '')}">
+        <span class="q-id">${escapeHtml(j.id)}</span>
+        <span class="q-title">${escapeHtml(j.title || '')}</span>
+        <span class="q-sub">${statusBadge(j.status)}${kf}</span>
+      </button>
+      ${dl}${renderBtn}${retry}
+      <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
+    </li>`;
+  }).join('');
+  ul.querySelectorAll('.queue-open').forEach(b => b.addEventListener('click', () => openQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-render').forEach(b => b.addEventListener('click', () => renderQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-del').forEach(b => b.addEventListener('click', () => deleteQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-retry').forEach(b => b.addEventListener('click', () => retryQueueJob(b.dataset.key)));
+}
+
+async function openQueueJob(key) {
+  await autosaveQueue();             // flush edits on the previously-open job first
+  let job;
+  try {
+    const r = await fetch('/api/queue/' + key);
+    if (!r.ok) throw new Error(await r.text());
+    job = await r.json();
+  } catch (e) {
+    setStatus('queue-status', 'Could not open job: ' + e.message, 'err');
+    return;
+  }
+  if (!job.job_id) {
+    setStatus('queue-status', 'Still processing — open it once it says "ready".', 'err');
+    return;
+  }
+  state.activeQueueKey = key;
+  state.jobId = job.job_id;
+  state.source = {
+    width: job.width, height: job.height,
+    duration: job.duration, video_path: job.video_path,
+  };
+  state.keyframes = { 1: job.box1 || [], 2: job.box2 || [] };
+  state.currentTime = 0;
+  state.words = [];
+  state.renderRange = { start: null, end: null };
+  state.autoRange = { start: 0, end: job.duration };
+  // Reflect the job in the Step 1 form + prefill the auto-box prompts so a
+  // re-Generate uses the same prompt the batch ran with.
+  $('#f-url').value = job.url || '';
+  $('#f-title').value = job.title || 'clip';
+  $('#f-start').value = job.start || '00:00:00';
+  $('#f-end').value = job.end || '';
+  $('#f-desc').value = job.description || '';
+  if ($('#ab-prompt-1')) $('#ab-prompt-1').value = job.prompt1 || '';
+  if ($('#ab-prompt-2')) $('#ab-prompt-2').value = job.prompt2 || '';
+  if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
+  els.video.src = job.video_path;
+  updatePlayBtn(false);
+  setActiveBox(null);
+  updateRangeMeta();
+  state.queueSig = queueSig();       // baseline so autosave only fires on real edits
+  setStatus('queue-status', `Editing "${job.id}" — box edits auto-save.`, 'ok');
+  showStep(2);
+  refreshQueue();                    // update the active highlight
+}
+
+function queueSig() {
+  return JSON.stringify({
+    t: ($('#f-title').value || ''),
+    b1: state.keyframes[1],
+    b2: state.keyframes[2],
+  });
+}
+
+async function autosaveQueue() {
+  if (!state.activeQueueKey) return;
+  const sig = queueSig();
+  if (sig === state.queueSig) return;   // nothing changed since last save
+  state.queueSig = sig;
+  try {
+    await apiPost(`/api/queue/${state.activeQueueKey}/save`, {
+      title: $('#f-title').value.trim() || 'clip',
+      box1: state.keyframes[1] || [],
+      box2: state.keyframes[2] || [],
+    });
+    setStatus('queue-status', 'Progress saved ✓', 'ok');
+  } catch (e) { /* try again next tick — keep the new sig so we don't spin */ }
+}
+
+async function deleteQueueJob(key) {
+  if (!confirm('Delete this job from the queue? Its downloaded clip is removed too.')) return;
+  try {
+    await fetch('/api/queue/' + key, { method: 'DELETE' });
+    if (state.activeQueueKey === key) state.activeQueueKey = null;
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Delete failed: ' + e.message, 'err');
+  }
+}
+
+async function retryQueueJob(key) {
+  try {
+    await apiPost(`/api/queue/${key}/retry`, {});
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Retry failed: ' + e.message, 'err');
+  }
+}
+
+async function renderQueueJob(key) {
+  if (state.activeQueueKey === key) await autosaveQueue();   // flush box edits first
+  try {
+    await apiPost(`/api/queue/${key}/render`, {});
+    setStatus('queue-status', 'Queued for render — transcribe + render runs in the background, one at a time.', 'ok');
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Could not queue render: ' + e.message, 'err');
+  }
+}
+
+async function renderAllReady() {
+  try {
+    const r = await apiPost('/api/queue/render-ready', {});
+    setStatus('queue-status', r.queued ? `Queued ${r.queued} clip(s) for render.` : 'No ready clips to render.', 'ok');
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Failed: ' + e.message, 'err');
   }
 }

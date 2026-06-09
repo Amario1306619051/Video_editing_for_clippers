@@ -120,3 +120,31 @@ class AutoBoxResponse(BaseModel):
     sampled: int = 0            # frames the vision model looked at
     detected: int = 0           # frames where the subject was found
     message: str = ""
+
+
+class ThumbnailTextRequest(BaseModel):
+    """Ask the text LLM for eye-catching thumbnail headline options derived from
+    the video's context. The frame capture + compositing are done client-side;
+    this only returns suggested wording (the user can always type their own)."""
+    context: str = ""           # title + description + transcript (whatever the UI has)
+    n: int = 5                  # how many options to return
+    language: str = ""          # optional hint; empty = match the content language
+
+
+class ThumbnailTextResponse(BaseModel):
+    titles: list[str] = Field(default_factory=list)
+
+
+class QueueImportRequest(BaseModel):
+    """Raw text of the uploaded JSON file. Parsed server-side (tolerant of the
+    Python-dict single-quote style the user pastes)."""
+    content: str
+
+
+class QueueJobPatch(BaseModel):
+    """Edits saved back to a queue job from the editor (auto-save). All optional —
+    only the provided fields are written."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    box1: Optional[list[Keyframe]] = None
+    box2: Optional[list[Keyframe]] = None

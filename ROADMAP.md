@@ -6,6 +6,14 @@ See also the "Roadmap (priority order)" section in `CLAUDE.md` for the existing 
 
 ---
 
+## Batch queue — JSON import + background download/auto-box — DONE (2026-06)
+
+**Status:** ✅ shipped. A persistent sidebar queue (`batchqueue.py` + queue-* frontend).
+
+Upload a JSON keyed by video URL — `{ "<url>": [ {id,start,end,title,description,bbox_1,bbox_2}, ... ] }` — and walk away. A single background worker downloads each clip and predicts both crop boxes from the `bbox_1`/`bbox_2` **text prompts**, one job at a time, persisting to `queue/queue.json` (survives restart). The sidebar lists jobs by id with live status; open a `ready` one to fine-tune the boxes (auto-saved back). Then hit ▶ (or "Render all ready") → the same worker does **transcribe + render** one at a time → `done` with a downloadable mp4 — so even the heavy GPU/CPU step never runs two at once. Delete a job when done. Covers the old `--batch config.json` idea (CLAUDE.md roadmap #6) with a UI + resumable progress. illustrator's copy stops at predict (render stays manual — needs the Illustration step; the JSON's `segment_seconds` pre-fills that step instead). See CLAUDE.md "Batch queue". **Module is `batchqueue.py`, not `queue.py`** (stdlib shadow).
+
+---
+
 ## Vision-LM automatic crop-box detection (replace manual boxes)
 
 **Status:** ✅ DONE 2026-06 (v1). "AI Auto-box" in Step 2: pick a Box, type what to track
@@ -159,15 +167,15 @@ Applies to the `illustrator` sibling too (same blocking render + static status p
 
 ---
 
-## Thumbnail generator (cover image for the clip) — enhancement
+## Thumbnail generator (cover image for the clip) — DONE (2026-06)
 
-**Status:** planned · GitHub issue #5
+**Status:** ✅ shipped. A standalone **Thumbnail** step (panel 4).
 
-**Why:** clippers need a thumbnail/cover to post the clip; today it's made in a separate tool.
+**What shipped:** pick a frame on a dedicated scrubber → the text LLM proposes eye-catching headline ideas (`POST /api/thumbnail-text`), editable or type your own → style it (font / size / color / outline / position / UPPERCASE / shade + a cover-crop focus pan) → **Download PNG** at 1080×1920.
 
-**Proposed:** a "Generate Thumbnail" button → cover IMAGE: pick/auto-suggest a frame, bold title text (bundled Anton/Bebas Neue + fat stroke, separate from burned captions), aspect options (16:9 / 9:16 / 1:1), export PNG/JPG to `output/`. Optional candidate thumbnails to pick from; stretch = subject cutout.
+**How it differs from the original proposal:** built **client-side on a canvas** (frame capture, cover-crop, text compositing, PNG export) rather than ffmpeg single-frame — instant WYSIWYG, no new temp/output files, no `to_ass_color()` reuse. Aspect is **9:16 only** (the chosen output format) instead of 16:9/1:1 options. The only backend addition is the headline-text LLM call; headlines come back in the content's language. See CLAUDE.md "Thumbnail generator".
 
-**Notes:** new `POST /api/thumbnail` → ffmpeg single-frame (`-ss t -frames:v 1` + ASS/drawtext + scale/pad). ffmpeg-only, no heavy deps. Reuse `assets/fonts/`, `to_ass_color()`. Distinct from #2 (text overlay on first 1-3s of the VIDEO) — this is a standalone image.
+**Still open (different feature):** an **in-video text-overlay hook** (big bold text burned over the first 1-3s of the rendered mp4) — that one needs a `RenderRequest` field + a renderer change. Don't conflate it with the PNG thumbnail above.
 
 ---
 

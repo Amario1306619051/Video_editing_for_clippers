@@ -1,6 +1,7 @@
 # ---- Runtime data / outputs (NEVER PUSH) ----
 temp/
 output/
+queue/
 *.mp4
 *.ass
 *.srt

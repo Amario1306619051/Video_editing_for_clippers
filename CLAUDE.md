@@ -70,9 +70,11 @@ clipper/
 │   ├── renderer.py      ffmpeg compose: crop → vstack → burn ASS subs
 │   ├── vision.py        Vision-LM client: prompt → bbox (AI auto-box); self-loads .env
 │   ├── autobox.py       Track predictor: sample frames over a range → keyframes
+│   ├── thumbnail.py     Text-LLM client: context → eye-catching headline ideas; self-loads .env
+│   ├── batchqueue.py    Persistent batch queue + background worker (JSON import → download + auto-box)
 │   └── models.py        Pydantic request/response schemas
 ├── frontend/
-│   ├── index.html       3 panels (source/position/render), step nav
+│   ├── index.html       4 panels (source/position/render/thumbnail) + batch-queue sidebar, step nav
 │   ├── style.css        Dark editorial theme, CSS vars in :root
 │   └── app.js           Canvas drawing, aspect-locked drag, API calls
 ├── temp/                Source videos. Auto-deleted after render.
@@ -92,7 +94,16 @@ All under `/api/`. Bodies are JSON, responses are JSON.
 | POST   | `/api/transcribe`| `{job_id}`                           | `{words: [{word, start, end}]}`              |
 | POST   | `/api/render`    | `{job_id, title, box1, box2, words, caption_font, caption_size, cleanup}` | `{output_path, filename}` |
 | POST   | `/api/autobox`   | `{job_id, prompt, t_start, t_end, box, step_seconds}` | `{keyframes:[Keyframe], sampled, detected, message}` |
-| GET    | `/api/capabilities` | —                                 | `{vision: bool}` (is AI auto-box available)  |
+| POST   | `/api/thumbnail-text` | `{context, n, language}`        | `{titles: [str]}` (eye-catching headline ideas) |
+| POST   | `/api/queue/import` | `{content}` (raw JSON text)       | `{added, skipped, total}` (queue clips for the worker) |
+| GET    | `/api/queue`     | —                                    | `{jobs: [{key,id,title,status,message,kf1,kf2,ready}]}` (sidebar summary) |
+| GET    | `/api/queue/{key}` | —                                  | full job (incl. `box1`/`box2` keyframes, `job_id`, dims) |
+| POST   | `/api/queue/{key}/save` | `{title?, box1?, box2?, description?}` | `{ok}` (auto-save editor edits) |
+| POST   | `/api/queue/{key}/render` | —                            | `{ok}` (queue this job for background transcribe + render) |
+| POST   | `/api/queue/render-ready` | —                            | `{queued}` (queue ALL ready jobs for render) |
+| POST   | `/api/queue/{key}/retry` | —                             | `{ok}` (re-queue an errored job at the right phase) |
+| DELETE | `/api/queue/{key}` | —                                  | `{ok}` (remove job + its downloaded clip) |
+| GET    | `/api/capabilities` | —                                 | `{vision: bool, thumbnail: bool}` (auto-box / headline ideas available) |
 | POST   | `/api/cleanup`   | `{job_id}`                           | `{ok: true}`                                 |
 | GET    | `/temp/{name}`   | —                                    | mp4 stream (for browser preview)             |
 | GET    | `/output/{name}` | —                                    | mp4 download                                 |
@@ -234,8 +245,23 @@ In Step 2 the user picks a Box, types what to track (e.g. "the speaker"), drags 
 - Frames are downscaled to ≤1280px before sending (normalized coords are scale-free → still converted with source W/H). Vision calls run `ThreadPoolExecutor(max_workers=4)` — the endpoint's clean-concurrency sweet spot (study: 4 great, ≤6 ok). `MAX_FRAMES=80` caps cost on long ranges (the response message says when the step was widened). Absent stretches become `gap` keyframes (empty/black slot) — `_build_keyframes` handles the present→absent→present transitions (gap on runs of ≥2 misses or absence at the range start/end; lone misses bridged), so the box appears only while the subject is actually on screen.
 - **Stable size (default, `lock_size=True`)**: a two-pass step — after predicting every frame, `_stabilize_size` locks ONE box size for the whole range (the ~85th percentile of widths/heights) and only PANS the center. Kills zoom jitter (per-frame sizes otherwise wobble); constant size also renders as a smooth expression-crop instead of stepped per-segment crops. Toggle off (UI "Stable size") for adaptive per-frame size.
 
-### No state persistence
-Restarting the server loses all in-flight jobs. `temp/` survives, but the frontend forgets its `job_id`. This is intentional — single-user local tool, no need for Redis/SQLite. Don't add persistence without asking.
+### Thumbnail generator (Step 4) — `thumbnail.py` + the thumb-* frontend block
+A standalone 9:16 cover maker, separate from the video render. **Almost entirely client-side**: the picked frame, the cover-crop, the text compositing and the PNG export all happen on a `<canvas>` in `app.js` (the `thumb` state + `drawThumbnailInto`). The **only** backend touch is `/api/thumbnail-text` → `thumbnail.generate_titles`, which asks the text LLM for a few eye-catching headline options.
+- **Text model = the text vLLM** (`VLLM_BASE_URL`/`VLLM_MODEL`, the internal Qwen3 — same one illustrator uses for queries; NOT the vision endpoint). `thumbnail.py` self-loads `.env` and defaults the vars to the internal endpoint, so it's enabled out of the box. `enable_thinking=False` + cold-start retries, same as `illustrator/backend/llm.py`. If the endpoint is unreachable it falls back to a keyword guess; if `VLLM_*` is cleared, `/api/capabilities` returns `{thumbnail:false}` and only the **Generate ideas** button is disabled — manual typing + export still work.
+- **Headlines are in the CONTENT's language, not English.** The system prompt tells the model to match the transcript language (Indonesian content → Indonesian headlines). This is deliberate: the English-everywhere rule is about the codebase/UI, NOT the user's generated output. Don't "fix" it to force English.
+- **The frontend draw is parametric** (`drawThumbnailInto(ctx, W, H)`) so the 405×720 preview and the 1080×1920 export use identical code — `size` is in output (1080-wide) px and scaled by `W/OUT_W`. Webfonts must be loaded before rasterizing: `document.fonts.load(...)` is awaited before the export `toBlob`. A dedicated `#thumb-video` (its own scrubber) is used so the Step 2 video's currentTime isn't disturbed; `loadeddata` paints the first frame so the preview isn't black before the user scrubs.
+- Export is a client-side `canvas.toBlob('image/png')` → `<a download>` — nothing is written server-side, no new temp/output files. Filename = `<title>_thumbnail.png`.
+
+### Batch queue (sidebar) — `batchqueue.py` + the queue-* frontend block
+Upload a JSON of clips and walk away: a single background worker downloads each clip and predicts its crop boxes from the per-box **text prompts**, one job at a time, so the user returns to ready-to-edit clips instead of waiting on predict+download live. The sidebar lists jobs by id; opening a `ready` one loads it into Step 2 (boxes pre-filled, editable), edits **auto-save** back to the job, and a job is deleted when done.
+- **Import format (keyed by video URL, tolerant of Python-dict single quotes):** `{ "<url>": [ {id,start,end,title,description,bbox_1,bbox_2}, ... ] }`. `bbox_1`/`bbox_2` are the auto-box **prompts** (e.g. "the live streamer …"); `start`/`end` accept `"HH:MM:SS"` or plain seconds. `batchqueue._parse` tries `json.loads` then `ast.literal_eval` (handles the single-quote style the user pastes). Dedups by `id` on re-import.
+- **Worker** (`_worker_loop`, one daemon thread, started in `main.py`): per job → `downloading` (yt-dlp) → `predicting` (autobox over the whole clip, `lock_size=True`, box1 from prompt1 + box2 from prompt2) → `ready`. Sequential on purpose (don't hammer yt-dlp / the vision endpoint). A clip whose subject is absent yields no box (status still `ready`, note in `message`); a download failure → `error` (surfaced in the sidebar, with a ↻ retry).
+- **Render phase (on demand, clipper only — `RENDER_IN_QUEUE=True`):** after editing a `ready` job's boxes, the user hits ▶ on the sidebar item (or "Render all ready") → `render_queued` → the SAME worker does `rendering` (transcribe via Whisper + `renderer.render` with the saved/edited boxes, caption defaults `Anton`/64) → `done` (output at `/output/{filename}`, downloadable from the sidebar). So the heavy GPU/CPU work is **also serialized — only one render at a time** (the owner's explicit CPU concern). `_next_actionable` interleaves download/predict and render jobs in list order; `_render_one` builds `Keyframe`/`Word` objects from the stored dicts. `retry_job` is phase-aware (has boxes+job_id → re-render; else re-download/predict). **illustrator sets `RENDER_IN_QUEUE=False`** — its render needs the interactive Illustration step, so the queue stays download+predict only and the JSON's optional `segment_seconds`/`seg_seconds`/`jeda` pre-fills the Illustration step's duration so the user just picks images.
+- **⚠️ Module name:** the file is `batchqueue.py`, NOT `queue.py`. `main.py` puts `backend/` on `sys.path[0]`, so a `queue.py` there **shadows the stdlib `queue`** that urllib3/yt-dlp import → `partially initialized module 'queue'` crash on boot. Don't rename it back.
+- **Persistence:** `queue/queue.json` (atomic write via a `.tmp` + `replace`; guarded by an `RLock`). It survives restarts; a job left mid-`downloading`/`predicting` by a restart is reset to `pending` and retried (`_reset_interrupted`). `queue/` is gitignored. illustrator's copy is identical except `NUM_BOXES = 1` (predicts box1 only; `bbox_2` is parsed but unused).
+
+### State persistence — only the batch queue
+The ad-hoc (single-clip) flow is still **stateless**: restarting the server loses an in-flight ad-hoc job (the frontend forgets its `job_id`). That's intentional. The **only** thing persisted to disk is the batch queue (`queue/queue.json`, see above) — the owner asked for resumable batch progress. Don't add a DB or broader persistence (Redis/SQLite) without asking.
 
 ### YouTube download (yt-dlp) gotchas
 Three things must line up or download silently returns only storyboard PNGs (yt-dlp logs a confusing "Requested format is not available" error):
@@ -255,11 +281,11 @@ Owner said: **test end-to-end first → fix bugs → then features**. Don't jump
 Flow (post-rework): Source → Position → **Render Final (with Caption)** — single click that transcribes (Whisper, cached after first call this session) AND renders + burns caption in one go. There's also a smaller "Quick preview (no caption)" button for fast iteration on box positioning. Then **Done** (cleanup source). The owner explicitly asked for one-shot captioned output; do not re-add a separate "Add Auto Caption" button after the render.
 
 1. **End-to-end test pass** — run a real YouTube clip through it on owner's machine. Fix whatever breaks. Likely candidates: ffmpeg subtitle path on Windows, font fallback on Linux.
-2. **Thumbnail hook** — owner deferred this. Spec when picked up: text overlay (1-3s) at start of video, big bold text, separate config from regular caption. Probably needs a new optional field on `RenderRequest`.
+2. ~~**Thumbnail generator**~~ — **DONE** (2026-06). A standalone **Thumbnail** step (panel 4): pick a frame on its own scrubber, the text LLM proposes eye-catching headlines (editable, or type your own), then export a 1080×1920 PNG. Entirely client-side canvas (frame capture + compositing + export); the only backend call is `/api/thumbnail-text`. See the "Thumbnail generator" gotcha. NOTE: this is the *cover image* tool. The originally-deferred idea of an **in-video text-overlay hook** (big bold text burned over the first 1-3s of the rendered mp4) is still open — that one needs a new optional field on `RenderRequest` + a renderer change, and is unrelated to the PNG thumbnail.
 3. **Drag-to-move existing boxes** — currently drawing a new box replaces the old one. Should allow click-and-drag inside an existing box to reposition (keeping size).
 4. **Edit transcript** — clickable word chips in step 3 that open an inline editor. Whisper makes mistakes on Indonesian; user needs to fix before render.
 5. **Resize handle on boxes** — corner handles to resize an existing box (keeping aspect locked).
-6. **Batch mode via config.json** — currently `config.json` is just a stub. Wire it up as a CLI mode: `python main.py --batch configs/*.json` that runs without UI.
+6. **Batch mode** — ✅ largely **DONE** (2026-06) via the **batch queue** (sidebar): upload a JSON keyed by video URL (`{url: [{id,start,end,title,description,bbox_1,bbox_2}]}`) → a background worker downloads + auto-boxes each clip (from the bbox prompts), persisting progress to `queue/queue.json`; the user opens each ready job to fine-tune and deletes when done. See the "Batch queue" gotcha + `batchqueue.py`. (The original idea was a headless `--batch configs/*.json` CLI; the queue covers the same need with a UI + resumable progress. A CLI entry point on top of `batchqueue` is still possible if wanted. The `config.json` stub remains unused.)
 7. ~~Smooth keyframe interpolation~~ — **DONE** (2026-05). Linear interp between keyframes via per-frame ffmpeg `crop` expressions. Smoother curves (cubic/easing) is a future option if the linear pans feel mechanical.
 8. ~~Better caption fonts / styling~~ — **DONE** (2026-05). Bundled Anton (default) + Bebas Neue in `assets/fonts/`, libass pointed via `fontsdir=`, fat outline + TikTok-karaoke per-word highlight. See `ROADMAP.md` + "Caption styling" gotcha below. Remaining stretch (box bg / accent-fill / fades) is optional.
 9. **Auto-segment long video → clip list (LLM)** — segmentation (which moments to clip, with start/end/title/description) is currently done manually in Gemini web and pasted in. Build it into the tool: transcribe → LLM proposes segments grounded on the transcript → emit the `config.json` job schema. Pluggable provider (Gemini paid API **or** own vLLM/Qwen endpoint like `illustrator`). Ties into batch mode (#6). Full spec in `ROADMAP.md`.
