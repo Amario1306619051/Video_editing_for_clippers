@@ -72,9 +72,10 @@ clipper/
 │   ├── autobox.py       Track predictor: sample frames over a range → keyframes
 │   ├── thumbnail.py     Text-LLM client: context → eye-catching headline ideas; self-loads .env
 │   ├── batchqueue.py    Persistent batch queue + background worker (JSON import → download + auto-box)
+│   ├── soundboard.py    Persistent SFX library (SQLite + audio files); renderer mixes placements into the audio
 │   └── models.py        Pydantic request/response schemas
 ├── frontend/
-│   ├── index.html       4 panels (source/position/render/thumbnail) + batch-queue sidebar, step nav
+│   ├── index.html       5 panels (source/position/render/thumbnail/sound) + batch-queue sidebar, step nav
 │   ├── style.css        Dark editorial theme, CSS vars in :root
 │   └── app.js           Canvas drawing, aspect-locked drag, API calls
 ├── temp/                Source videos. Auto-deleted after render.
@@ -103,7 +104,14 @@ All under `/api/`. Bodies are JSON, responses are JSON.
 | POST   | `/api/queue/render-ready` | —                            | `{queued}` (queue ALL ready jobs for render) |
 | POST   | `/api/queue/{key}/retry` | —                             | `{ok}` (re-queue an errored job at the right phase) |
 | DELETE | `/api/queue/{key}` | —                                  | `{ok}` (remove job + its downloaded clip) |
+| GET    | `/api/soundboard` | —                                   | `{sounds: [{id,name,ext,duration,volume}]}` (SFX library) |
+| POST   | `/api/soundboard` | raw audio body, `?name=&filename=`  | `{id,name,ext,duration,volume}` (import a sound) |
+| POST   | `/api/soundboard/{id}` | `{name?, volume?}`             | updated sound (rename / default volume) |
+| DELETE | `/api/soundboard/{id}` | —                              | `{ok}` (delete sound + its file) |
+| GET    | `/api/soundboard/{id}/audio` | —                        | the audio file (preview playback) |
 | GET    | `/api/capabilities` | —                                 | `{vision: bool, thumbnail: bool}` (auto-box / headline ideas available) |
+
+`RenderRequest` carries an optional `sfx: [{sound_id, kind('oneshot'|'range'), t, t_end?, volume, loop}]` — soundboard placements mixed into the audio at render (see the "Soundboard / SFX" gotcha).
 | POST   | `/api/cleanup`   | `{job_id}`                           | `{ok: true}`                                 |
 | GET    | `/temp/{name}`   | —                                    | mp4 stream (for browser preview)             |
 | GET    | `/output/{name}` | —                                    | mp4 download                                 |
@@ -259,6 +267,13 @@ Upload a JSON of clips and walk away: a single background worker downloads each 
 - **Render phase (on demand, clipper only — `RENDER_IN_QUEUE=True`):** after editing a `ready` job's boxes, the user hits ▶ on the sidebar item (or "Render all ready") → `render_queued` → the SAME worker does `rendering` (transcribe via Whisper + `renderer.render` with the saved/edited boxes, caption defaults `Anton`/64) → `done` (output at `/output/{filename}`, downloadable from the sidebar). So the heavy GPU/CPU work is **also serialized — only one render at a time** (the owner's explicit CPU concern). `_next_actionable` interleaves download/predict and render jobs in list order; `_render_one` builds `Keyframe`/`Word` objects from the stored dicts. `retry_job` is phase-aware (has boxes+job_id → re-render; else re-download/predict). **illustrator sets `RENDER_IN_QUEUE=False`** — its render needs the interactive Illustration step, so the queue stays download+predict only and the JSON's optional `segment_seconds`/`seg_seconds`/`jeda` pre-fills the Illustration step's duration so the user just picks images.
 - **⚠️ Module name:** the file is `batchqueue.py`, NOT `queue.py`. `main.py` puts `backend/` on `sys.path[0]`, so a `queue.py` there **shadows the stdlib `queue`** that urllib3/yt-dlp import → `partially initialized module 'queue'` crash on boot. Don't rename it back.
 - **Persistence:** a local **SQLite** database `queue/queue.db` (NOT a JSON file — the owner asked for a real DB). Two relational tables: `jobs` (one row per clip, scalar columns) and `keyframes` (one row per crop-box keyframe — `(job_key, box, idx, t, x, y, w, h, interp, fit, gap)`, FK to `jobs(key)` `ON DELETE CASCADE`; **no JSON blob anywhere**). `sqlite3` ships with Python — no server, no new dependency. All access is serialized through a module `RLock` + short-lived connections (`_db()` context manager commits-and-closes, since `with sqlite3.connect()` only manages the transaction, not the handle); `PRAGMA foreign_keys=ON` per connection so cascade works. It survives restarts; a job left mid-`downloading`/`predicting`/`rendering` by a restart is reset to `pending`/`render_queued` and retried (`_reset_interrupted`). A pre-existing `queue/queue.json` from the old version is auto-migrated once (`_migrate_json_if_any`). `queue/` is gitignored. illustrator's copy is identical except `NUM_BOXES = 1` and `RENDER_IN_QUEUE = False` (predicts box1 only, render stays manual).
+
+### Soundboard / SFX (Step 5) — `soundboard.py` + renderer audio mix
+A persistent library of imported sound-effect files + per-clip placements mixed into the render's audio.
+- **Library = `soundboard.py`** (its own SQLite db `soundboard/soundboard.db` + the audio files in `soundboard/`, gitignored). Same `_db()` plumbing as `batchqueue.py`. List / import / delete / serve survive restart. **Uploads are the RAW request body** (`await request.body()` in `main.py`) with `?name=&filename=` query params — deliberately NO `python-multipart` dependency. Allowed types gated by extension (`mp3/wav/ogg/m4a/aac/flac/opus/webm`).
+- **Placement** is per-clip, NOT persisted (it rides in `RenderRequest.sfx`). Two kinds: `oneshot` (plays once at `t`) and `range` (plays over `[t, t_end]`, `loop` repeats it to fill). Each has a linear `volume`. The frontend Step 5 (`#sfx-*`, `state.sfx`) has its own `#sfx-video` scrubber to pick times; placements reset per clip (`doDownload` / `openQueueJob`).
+- **Renderer audio graph** (`_audio_inputs_and_graph`, identical in both renderers): builds ONLY when `sfx` is non-empty — otherwise the plain `-map 0:a?` is untouched (zero regression for normal renders). Each SFX = one extra ffmpeg input after the source (clipper) / after the source+image inputs (illustrator: `first_sfx_index = 1 + len(img_inputs)`). Base = the clip's own audio (or `anullsrc`+`atrim` silence, bounded to the output duration, when the source has none). Each input is `volume`'d, `aformat`'d to a common 48k/stereo/fltp, range ones `atrim`'d to their window, delayed with `adelay={ms}:all=1`, then `amix=inputs=N:normalize=0:duration=first` (normalize=0 keeps levels so the user balances via volume; duration=first bounds it to the base). Looping a range uses **`-stream_loop -1` on that input** (demux level), not an `aloop` filter. SFX times are re-based to a render sub-range via `_shift_sfx` (mirrors `_shift_keyframes`/`_shift_words`).
+- The batch-queue auto-render path does NOT add SFX (placements aren't stored on a job) — SFX are an interactive-render feature. Don't wire SFX into the queue without asking.
 
 ### State persistence — only the batch queue
 The ad-hoc (single-clip) flow is still **stateless**: restarting the server loses an in-flight ad-hoc job (the frontend forgets its `job_id`). That's intentional. The **only** thing persisted to disk is the batch queue (the SQLite DB `queue/queue.db`, see above) — the owner asked for resumable batch progress. Don't broaden persistence beyond the queue (no server DB, no persisting the ad-hoc flow) without asking.

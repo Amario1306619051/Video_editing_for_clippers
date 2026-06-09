@@ -38,6 +38,9 @@ const state = {
   result: null,
   activeQueueKey: null,                   // batch-queue job currently loaded (null = ad-hoc)
   queueSig: null,                         // signature of last auto-saved queue state
+  sounds: [],                             // soundboard library (from /api/soundboard)
+  sfx: [],                                // SFX placements for this clip (sent at render)
+  sfxPreview: null,                       // currently-playing preview Audio
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -194,6 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   wireThumb();
   wireQueue();
+  wireSfx();
   updatePills();
   initCapabilities();
 });
@@ -222,12 +226,13 @@ function canGoToStep(n) {
   if (n === 2) return !!state.jobId;
   if (n === 3) return !!state.jobId;
   if (n === 4) return !!state.jobId;
+  if (n === 5) return !!state.jobId;
   return false;
 }
 
 function showStep(n) {
   state.step = n;
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 1; i <= 5; i++) {
     $(`#panel-${i}`).classList.toggle('hidden', i !== n);
   }
   document.querySelectorAll('.steps .step').forEach(b => {
@@ -248,6 +253,9 @@ function showStep(n) {
   }
   if (n === 4) {
     requestAnimationFrame(initThumbStep);
+  }
+  if (n === 5) {
+    requestAnimationFrame(initSfxStep);
   }
 }
 
@@ -1355,6 +1363,7 @@ async function doDownload() {
     state.words = [];
     state.renderRange = { start: null, end: null };
     state.autoRange = { start: 0, end: res.duration };
+    state.sfx = [];                // placements are per-clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
     updateRangeMeta();
@@ -1459,6 +1468,7 @@ function buildRenderBody(withWords) {
     cleanup: false,
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
+    sfx: state.sfx,
   };
   logBoxes(body);
   return body;
@@ -1942,6 +1952,7 @@ async function openQueueJob(key) {
   state.keyframes = { 1: job.box1 || [], 2: job.box2 || [] };
   state.currentTime = 0;
   state.words = [];
+  state.sfx = [];                  // placements are per-clip
   state.renderRange = { start: null, end: null };
   state.autoRange = { start: 0, end: job.duration };
   // Reflect the job in the Step 1 form + prefill the auto-box prompts so a
@@ -2026,4 +2037,191 @@ async function renderAllReady() {
   } catch (e) {
     setStatus('queue-status', 'Failed: ' + e.message, 'err');
   }
+}
+
+// ───────────────────────── sound effects (soundboard) ─────────────────────────
+// A persistent library of imported sounds (server-side, survives restart) +
+// per-clip placements (one-shot at a time, or a layer over a range, each with a
+// volume). Placements ride along in the render body → renderer mixes them.
+function wireSfx() {
+  els.sfxVideo = $('#sfx-video');
+  if (!els.sfxVideo) return;
+  const v = els.sfxVideo;
+  v.addEventListener('loadedmetadata', () => {
+    const scr = $('#sfx-scrubber'); if (scr) scr.max = v.duration || 0;
+    const d = $('#sfx-dur'); if (d) d.textContent = formatTime(v.duration || 0);
+  });
+  v.addEventListener('timeupdate', () => {
+    const t = $('#sfx-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
+    const scr = $('#sfx-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
+  });
+  v.addEventListener('play', () => { const b = $('#sfx-play'); if (b) b.textContent = '❚❚'; });
+  v.addEventListener('pause', () => { const b = $('#sfx-play'); if (b) b.textContent = '▶'; });
+  $('#sfx-play').addEventListener('click', () => { if (v.paused) v.play(); else v.pause(); });
+  $('#sfx-scrubber').addEventListener('input', (e) => { if (v.duration) v.currentTime = +e.target.value; });
+  $('#btn-sfx-import').addEventListener('click', () => $('#sfx-file').click());
+  $('#sfx-file').addEventListener('change', onSfxImport);
+  $('#sfx-rs-cur').addEventListener('click', () => { $('#sfx-rs').value = (v.currentTime || 0).toFixed(2); });
+  $('#sfx-re-cur').addEventListener('click', () => { $('#sfx-re').value = (v.currentTime || 0).toFixed(2); });
+  $('#btn-sfx-addrange').addEventListener('click', addSfxRange);
+  loadSounds();
+}
+
+function initSfxStep() {
+  if (!state.source || !els.sfxVideo) return;
+  const v = els.sfxVideo;
+  if (v.dataset.path !== state.source.video_path) {
+    v.dataset.path = state.source.video_path;
+    v.src = state.source.video_path;
+  }
+  loadSounds();
+  renderSfxList();
+}
+
+async function loadSounds() {
+  try {
+    const r = await fetch('/api/soundboard');
+    if (!r.ok) return;
+    const data = await r.json();
+    state.sounds = data.sounds || [];
+    renderBoard();
+    renderRangeSoundSelect();
+  } catch (e) { /* best-effort */ }
+}
+
+function fmtDur(s) {
+  s = s || 0;
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function renderBoard() {
+  const board = $('#sfx-board');
+  if (!board) return;
+  if (!state.sounds.length) {
+    board.innerHTML = '<div class="muted">No sounds yet — Import an audio file (mp3 / wav / ogg / m4a…).</div>';
+    return;
+  }
+  board.innerHTML = state.sounds.map(s => `
+    <div class="sfx-pad" data-id="${s.id}">
+      <button class="sfx-pad-play" data-id="${s.id}" title="preview">▶</button>
+      <span class="sfx-pad-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>
+      <span class="sfx-pad-dur">${fmtDur(s.duration)}</span>
+      <button class="sfx-pad-add" data-id="${s.id}" title="drop a one-shot at the current time">＋ here</button>
+      <button class="sfx-pad-del danger" data-id="${s.id}" title="delete from library">×</button>
+    </div>`).join('');
+  board.querySelectorAll('.sfx-pad-play').forEach(b => b.addEventListener('click', () => previewSound(b.dataset.id)));
+  board.querySelectorAll('.sfx-pad-add').forEach(b => b.addEventListener('click', () => addOneShot(b.dataset.id)));
+  board.querySelectorAll('.sfx-pad-del').forEach(b => b.addEventListener('click', () => deleteSound(b.dataset.id)));
+}
+
+function renderRangeSoundSelect() {
+  const sel = $('#sfx-range-sound');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = state.sounds.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  if (prev && state.sounds.some(s => s.id === prev)) sel.value = prev;
+}
+
+function previewSound(id) {
+  if (state.sfxPreview) { try { state.sfxPreview.pause(); } catch (_) {} }
+  const a = new Audio('/api/soundboard/' + id + '/audio');
+  state.sfxPreview = a;
+  a.play().catch(() => {});
+}
+
+async function onSfxImport() {
+  const file = $('#sfx-file').files[0];
+  if (!file) return;
+  $('#sfx-file').value = '';
+  setStatus('sfx-status', `Importing ${file.name}…`);
+  try {
+    const stem = file.name.replace(/\.[^.]+$/, '');
+    const r = await fetch(`/api/soundboard?name=${encodeURIComponent(stem)}&filename=${encodeURIComponent(file.name)}`,
+      { method: 'POST', body: file });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    await loadSounds();
+    setStatus('sfx-status', `Added "${stem}".`, 'ok');
+  } catch (e) {
+    setStatus('sfx-status', 'Import failed: ' + e.message, 'err');
+  }
+}
+
+async function deleteSound(id) {
+  const s = state.sounds.find(x => x.id === id);
+  if (!confirm(`Delete "${s ? s.name : id}" from the soundboard? Its placements are removed too.`)) return;
+  try {
+    await fetch('/api/soundboard/' + id, { method: 'DELETE' });
+    state.sfx = state.sfx.filter(p => p.sound_id !== id);
+    await loadSounds();
+    renderSfxList();
+  } catch (e) {
+    setStatus('sfx-status', 'Delete failed: ' + e.message, 'err');
+  }
+}
+
+function addOneShot(id) {
+  const t = els.sfxVideo ? (els.sfxVideo.currentTime || 0) : 0;
+  state.sfx.push({ sound_id: id, kind: 'oneshot', t: +t.toFixed(2), volume: 1.0 });
+  state.sfx.sort((a, b) => a.t - b.t);
+  renderSfxList();
+  setStatus('sfx-status', `One-shot added @ ${t.toFixed(2)}s.`, 'ok');
+}
+
+function addSfxRange() {
+  const sel = $('#sfx-range-sound');
+  const id = sel ? sel.value : '';
+  if (!id) { setStatus('sfx-status', 'No sound selected — import one first.', 'err'); return; }
+  const rs = parseFloat($('#sfx-rs').value);
+  const reV = parseFloat($('#sfx-re').value);
+  const t = isNaN(rs) ? 0 : Math.max(0, rs);
+  const te = isNaN(reV) ? (els.sfxVideo && els.sfxVideo.duration ? els.sfxVideo.duration : t + 1) : reV;
+  if (te <= t) { setStatus('sfx-status', 'End must be after start.', 'err'); return; }
+  state.sfx.push({
+    sound_id: id, kind: 'range', t: +t.toFixed(2), t_end: +te.toFixed(2),
+    volume: 1.0, loop: $('#sfx-loop') ? $('#sfx-loop').checked : true,
+  });
+  state.sfx.sort((a, b) => a.t - b.t);
+  renderSfxList();
+  setStatus('sfx-status', `Layer added ${t.toFixed(1)}–${te.toFixed(1)}s.`, 'ok');
+}
+
+function soundName(id) {
+  const s = state.sounds.find(x => x.id === id);
+  return s ? s.name : '(deleted sound)';
+}
+
+function renderSfxList() {
+  const ol = $('#sfx-list');
+  const count = $('#sfx-count');
+  if (count) count.textContent = state.sfx.length;
+  if (!ol) return;
+  if (!state.sfx.length) {
+    ol.innerHTML = '<li class="empty">No sounds placed yet — preview a pad, then ＋ here / Add layer.</li>';
+    return;
+  }
+  ol.innerHTML = state.sfx.map((p, i) => {
+    const when = p.kind === 'range'
+      ? `layer ${(+p.t).toFixed(1)}–${(+p.t_end).toFixed(1)}s${p.loop ? ' · loop' : ''}`
+      : `one-shot @ ${(+p.t).toFixed(2)}s`;
+    const volPct = Math.round((p.volume == null ? 1 : p.volume) * 100);
+    return `<li>
+      <span class="sfx-it-name" title="${escapeHtml(soundName(p.sound_id))}">${escapeHtml(soundName(p.sound_id))}</span>
+      <span class="sfx-it-when">${when}</span>
+      <span class="sfx-it-vol"><input type="range" min="0" max="200" step="5" value="${volPct}" data-i="${i}" class="sfx-vol"><b data-volb="${i}">${volPct}%</b></span>
+      <button class="sfx-it-seek" data-seek="${i}" title="seek to its start">▶</button>
+      <button class="sfx-it-del danger" data-del="${i}" title="remove placement">×</button>
+    </li>`;
+  }).join('');
+  ol.querySelectorAll('.sfx-vol').forEach(inp => inp.addEventListener('input', (e) => {
+    const i = +e.target.dataset.i;
+    state.sfx[i].volume = (+e.target.value) / 100;
+    const b = ol.querySelector(`b[data-volb="${i}"]`); if (b) b.textContent = e.target.value + '%';
+  }));
+  ol.querySelectorAll('.sfx-it-seek').forEach(b => b.addEventListener('click', () => {
+    const p = state.sfx[+b.dataset.seek]; if (p && els.sfxVideo) els.sfxVideo.currentTime = p.t;
+  }));
+  ol.querySelectorAll('.sfx-it-del').forEach(b => b.addEventListener('click', () => {
+    state.sfx.splice(+b.dataset.del, 1); renderSfxList();
+  }));
 }

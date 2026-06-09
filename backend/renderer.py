@@ -5,7 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from models import Keyframe, Word
+import soundboard
+from models import Keyframe, SfxPlacement, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -303,6 +304,113 @@ def _shift_words(words: list[Word], start: float, end: Optional[float]) -> list[
     return out
 
 
+# ───────────────────────── soundboard SFX (audio mix) ─────────────────────────
+def _shift_sfx(sfx: list[SfxPlacement], start: float, end: Optional[float]) -> list[SfxPlacement]:
+    """Re-base SFX placements onto the render sub-range (so filtergraph t=0 ==
+    `start`). One-shots before `start` or at/after `end` are dropped; range
+    placements are clipped to the window. No-op when there's no sub-range."""
+    if not sfx:
+        return sfx or []
+    if (not start or start <= 0) and end is None:
+        return sfx
+    start = max(0.0, start or 0.0)
+    out: list[SfxPlacement] = []
+    for s in sfx:
+        if s.kind == "range":
+            t0 = max(float(s.t), start)
+            t1 = float(s.t_end) if s.t_end is not None else (end if end is not None else t0)
+            if end is not None:
+                t1 = min(t1, end)
+            if t1 <= t0:
+                continue
+            out.append(s.model_copy(update={"t": t0 - start, "t_end": t1 - start}))
+        else:
+            t = float(s.t)
+            if t < start or (end is not None and t >= end):
+                continue
+            out.append(s.model_copy(update={"t": t - start}))
+    return out
+
+
+def _probe_has_audio(path: Path) -> bool:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True)
+        return "audio" in (out.stdout or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _probe_duration(path: Path) -> float:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, check=True)
+        return float((out.stdout or "0").strip() or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+_AFMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+
+
+def _audio_inputs_and_graph(sfx, source_has_audio, out_dur, src_audio="0:a", first_sfx_index=1):
+    """Build the audio side when SFX are placed. Returns (extra_input_args,
+    filter_parts, amap). Each usable SFX becomes one extra ffmpeg input.
+    Returns ([], [], None) when there are no usable SFX — the caller then keeps
+    the plain `-map 0:a?` behavior (zero change for normal renders).
+
+    Mix = the clip's own audio (or silence if the source has none) + every SFX,
+    each scaled by its volume and delayed to its start. `amix normalize=0` keeps
+    levels as-is (the user balances via the per-placement volume); range SFX are
+    trimmed to their window and looped at the demux level (-stream_loop) when
+    asked. `duration=first` bounds the mix to the base track."""
+    usable = []
+    for s in (sfx or []):
+        p = soundboard.path_for(s.sound_id)
+        if p:
+            usable.append((s, p))
+    if not usable:
+        return [], [], None
+
+    parts: list[str] = []
+    if source_has_audio:
+        parts.append(f"[{src_audio}]{_AFMT}[abase]")
+    else:
+        parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                     f"atrim=duration={max(0.1, out_dur):.3f}[abase]")
+    labels = ["abase"]
+
+    inputs: list[str] = []
+    idx = first_sfx_index
+    for j, (s, p) in enumerate(usable):
+        is_range = (s.kind == "range" and s.t_end is not None)
+        if is_range and bool(s.loop):
+            inputs += ["-stream_loop", "-1"]   # loop at the demux level
+        inputs += ["-i", str(p)]
+        f: list[str] = []
+        if is_range:
+            dur = max(0.05, float(s.t_end) - float(s.t))
+            f.append(f"atrim=duration={dur:.3f}")
+            f.append("asetpts=PTS-STARTPTS")
+        vol = max(0.0, float(s.volume if s.volume is not None else 1.0))
+        f.append(f"volume={vol:.3f}")
+        f.append(_AFMT)
+        delay = int(round(max(0.0, float(s.t)) * 1000))
+        if delay > 0:
+            f.append(f"adelay={delay}:all=1")
+        parts.append(f"[{idx}:a]" + ",".join(f) + f"[sfx{j}]")
+        labels.append(f"sfx{j}")
+        idx += 1
+
+    mix = "".join(f"[{lbl}]" for lbl in labels)
+    parts.append(f"{mix}amix=inputs={len(labels)}:normalize=0:duration=first[aout]")
+    return inputs, parts, "[aout]"
+
+
 def _normalize_keyframes(keyframes: list[Keyframe]) -> list[dict]:
     """Sort by t, clamp negatives, ensure min size, normalize interp + fit + gap."""
     cleaned: list[dict] = []
@@ -594,6 +702,7 @@ def render(
     caption_size: int = 64,
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
+    sfx: Optional[list[SfxPlacement]] = None,
 ) -> dict:
     if not box1 and not box2:
         raise ValueError("at least one of box1/box2 must be provided")
@@ -614,6 +723,7 @@ def render(
             box2 = _shift_keyframes(box2, rs)
         if words:
             words = _shift_words(words, rs, re_)
+        sfx = _shift_sfx(sfx, rs, re_)
 
     # Defense-in-depth: clamp boxes inside the actual source frame (no-op for
     # valid boxes; prevents an off-frame crop from crashing ffmpeg).
@@ -696,11 +806,21 @@ def render(
     else:
         vmap = f"[{last}]"
 
+    # Soundboard SFX → audio mix (only when sounds are placed; otherwise the
+    # plain optional source-audio mapping is kept, i.e. zero change).
+    src_dur = _probe_duration(source_path)
+    out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
+    sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
+        sfx, _probe_has_audio(source_path), out_dur, first_sfx_index=1)
+    if sfx_parts:
+        parts.extend(sfx_parts)
+    audio_map = amap or "0:a?"
+
     filter_complex = ";".join(parts)
 
     # Input-side seek (-ss) + duration (-t) when a sub-range is set. With -ss
     # before -i ffmpeg resets the filter graph's `t` to 0 at the seek point,
-    # which is why we pre-shift keyframes/words above to match.
+    # which is why we pre-shift keyframes/words/sfx above to match.
     input_seek: list[str] = []
     if rs > 0:
         input_seek += ["-ss", f"{rs:.3f}"]
@@ -726,9 +846,10 @@ def render(
         *hwaccel,
         *input_seek,
         "-i", str(source_path),
+        *sfx_inputs,
         "-filter_complex", filter_complex,
         "-map", vmap,
-        "-map", "0:a?",
+        "-map", audio_map,
         *_encode_args(),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",

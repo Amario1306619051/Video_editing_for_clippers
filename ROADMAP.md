@@ -6,6 +6,14 @@ See also the "Roadmap (priority order)" section in `CLAUDE.md` for the existing 
 
 ---
 
+## Soundboard / sound effects — DONE (2026-06)
+
+**Status:** ✅ shipped in both projects (clipper Step 5, illustrator Step 6).
+
+Import audio files into a persistent **soundboard** (SQLite db + files in `soundboard/`, survives restart, deletable, in-browser preview). Drop sounds onto a clip two ways — **one-shot** at a timestamp, or a **layer over a range** (loops to fill if shorter) — each with its own **volume** to balance against the clip's audio. Placements ride in `RenderRequest.sfx`; the renderer mixes them (`amix normalize=0`, per-input `volume`+`adelay`, `-stream_loop` for looped ranges; silent base when the source has no audio). Uploads are the raw request body (no `python-multipart` dep). See CLAUDE.md "Soundboard / SFX". **Module is `soundboard.py`.** Not wired into the batch-queue auto-render (interactive-render feature).
+
+---
+
 ## Batch queue — JSON import + background download/auto-box — DONE (2026-06)
 
 **Status:** ✅ shipped. A persistent sidebar queue (`batchqueue.py` + queue-* frontend).
