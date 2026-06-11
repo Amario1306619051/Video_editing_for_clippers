@@ -1108,3 +1108,8 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .intro-opts select, .intro-opts input[type="number"] { width: auto; }
 .intro-check { flex-direction: row !important; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
 .intro-check input { width: auto; margin: 0; }
+
+/* thumbnail intro: preview row + transition preview canvas */
+.intro-prev-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.th-trans-canvas { width: 120px; height: 213px; background: #000; border: 1px solid var(--border); border-radius: 4px; display: block; }
+.th-trans-canvas.hidden { display: none; }

@@ -41,10 +41,14 @@ def synthesize(text: str, out_path: Path) -> Path:
     voice = voice_path()
     if voice is None:
         raise RuntimeError("no Piper voice installed (clipper/voices/*.onnx)")
-    proc = subprocess.run(
-        [sys.executable, "-m", "piper", "-m", str(voice), "-f", str(out_path)],
-        input=text, capture_output=True, text=True,
-    )
+    try:
+        # timeout kills the piper child on expiry — no orphan process pinning a CPU
+        proc = subprocess.run(
+            [sys.executable, "-m", "piper", "-m", str(voice), "-f", str(out_path)],
+            input=text, capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("piper timed out (text too long?)")
     if proc.returncode != 0:
         raise RuntimeError(f"piper failed: {proc.stderr.strip()[:300]}")
     if not Path(out_path).exists():

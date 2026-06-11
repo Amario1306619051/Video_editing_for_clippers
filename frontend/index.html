@@ -21,8 +21,8 @@
     <button class="step" data-step="5"><span>03</span> Sound</button>
     <button class="step" data-step="6"><span>04</span> Illustration</button>
     <button class="step" data-step="7"><span>05</span> Trim</button>
-    <button class="step" data-step="3"><span>06</span> Render</button>
-    <button class="step" data-step="4"><span>07</span> Thumbnail</button>
+    <button class="step" data-step="4"><span>06</span> Thumbnail</button>
+    <button class="step" data-step="3"><span>07</span> Render</button>
   </nav>
 </header>
 
@@ -259,23 +259,7 @@
         </div>
 
         <div class="intro-controls">
-          <label class="intro-toggle"><input type="checkbox" id="rd-intro"> Add intro card (from Thumbnail)</label>
-          <div class="intro-opts" id="rd-intro-opts">
-            <label><span>Transition</span>
-              <select id="rd-intro-trans">
-                <option value="fade">Crossfade</option>
-                <option value="dissolve">Dissolve</option>
-                <option value="zoomin">Zoom in</option>
-                <option value="slideleft">Slide left</option>
-                <option value="slideup">Slide up</option>
-                <option value="circleopen">Circle</option>
-                <option value="cut">Cut (none)</option>
-              </select>
-            </label>
-            <label><span>Min duration (s)</span><input type="number" id="rd-intro-dur" value="4" min="1" max="15" step="0.5"></label>
-            <label class="intro-check"><input type="checkbox" id="rd-intro-voice" checked> 🔊 Voiceover reads the headline</label>
-          </div>
-          <div class="hint">Set up your <b>Thumbnail (Step 7)</b> first — that image becomes the intro card and its headline is what the voice reads. The intro is prepended at render.</div>
+          <span class="hint" id="rd-intro-status">Intro card: off — configure it in the <b>Thumbnail</b> step (preview voice + transition there).</span>
         </div>
 
         <div class="words-box hidden" id="words-box">
@@ -290,7 +274,7 @@
     </div>
 
     <div class="actions">
-      <button class="ghost" data-go="7">← Back</button>
+      <button class="ghost" data-go="4">← Back</button>
       <button id="btn-render" class="primary">Render Final (with Caption) →</button>
       <button id="btn-render-nocap" class="ghost" title="skip Whisper, fast preview">Quick preview (no caption)</button>
       <span class="status" id="rd-status"></span>
@@ -371,11 +355,38 @@
             <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
           </div>
         </div>
+
+        <div class="thumb-sec">
+          <div class="thumb-sec-head">Intro card (prepend to the video)</div>
+          <label class="intro-toggle"><input type="checkbox" id="th-intro"> Use this thumbnail as a video intro</label>
+          <div class="intro-opts">
+            <label><span>Transition</span>
+              <select id="th-intro-trans">
+                <option value="fade">Crossfade</option>
+                <option value="dissolve">Dissolve</option>
+                <option value="zoomin">Zoom in</option>
+                <option value="slideleft">Slide left</option>
+                <option value="slideup">Slide up</option>
+                <option value="circleopen">Circle</option>
+                <option value="cut">Cut (none)</option>
+              </select>
+            </label>
+            <label><span>Min duration (s)</span><input type="number" id="th-intro-dur" value="4" min="1" max="15" step="0.5"></label>
+            <label class="intro-check"><input type="checkbox" id="th-intro-voice" checked> 🔊 Voiceover reads headline</label>
+          </div>
+          <div class="intro-prev-row">
+            <button class="ghost small" id="btn-th-voice">🔊 Preview voice</button>
+            <button class="ghost small" id="btn-th-trans">🎬 Preview transition</button>
+          </div>
+          <canvas id="th-trans-preview" width="180" height="320" class="th-trans-canvas hidden"></canvas>
+          <span class="status" id="th-intro-status"></span>
+          <div class="hint">The voice reads the headline above; the transition plays from this thumbnail into the clip. Applied when you <b>Render</b>.</div>
+        </div>
       </aside>
     </div>
 
     <div class="actions">
-      <button class="ghost" data-go="3">← Back</button>
+      <button class="ghost" data-go="7">← Back</button>
     </div>
   </section>
 

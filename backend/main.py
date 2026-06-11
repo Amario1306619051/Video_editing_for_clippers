@@ -1,7 +1,8 @@
 import sys
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +29,7 @@ from models import (
     QueueImportRequest, QueueJobPatch,
     SoundPatch,
     SearchRequest, SearchResponse,
+    TtsRequest,
     Word,
 )
 
@@ -259,6 +261,27 @@ def api_search(req: SearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"candidates": candidates}
+
+
+@app.post("/api/tts-preview")
+def api_tts_preview(req: TtsRequest):
+    """Synthesize text → wav with Piper, for previewing the intro voiceover.
+    Per-request unique file (concurrent previews must not clobber each other),
+    deleted right away — the small wav is returned as the response body."""
+    if not tts.enabled():
+        raise HTTPException(status_code=400, detail="no Piper voice installed (clipper/voices/*.onnx)")
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="empty text")
+    out = TEMP_DIR / f"tts_preview_{uuid.uuid4().hex}.wav"
+    try:
+        tts.synthesize(text, out)
+        data = out.read_bytes()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        out.unlink(missing_ok=True)
+    return Response(content=data, media_type="audio/wav")
 
 
 @app.post("/api/intro-image")

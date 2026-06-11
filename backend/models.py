@@ -116,6 +116,12 @@ class IntroConfig(BaseModel):
     voice: bool = True
 
 
+class TtsRequest(BaseModel):
+    """Text to synthesize for the intro voiceover preview. Capped — a pasted
+    transcript instead of a headline would tie Piper up for minutes."""
+    text: str = Field(..., max_length=500)
+
+
 class KeepSegment(BaseModel):
     """A [start, end] window to KEEP (seconds, clip time). At render, everything
     OUTSIDE all kept windows is dropped and the kept parts are concatenated —

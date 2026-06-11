@@ -231,8 +231,11 @@ async function initCapabilities() {
       setStatus('ill-status', 'Illustration search is off — set PEXELS_API_KEY in clipper/.env (same key as illustrator).', 'err');
     }
     if (!caps.tts) {
-      const vc = $('#rd-intro-voice');
+      const vc = $('#th-intro-voice');
       if (vc) { vc.checked = false; vc.disabled = true; vc.closest('label').title = 'No Piper voice installed (clipper/voices/*.onnx) — intro will be silent.'; }
+      const pv = $('#btn-th-voice'); if (pv) pv.disabled = true;
+      thumb.intro.voice = false;   // programmatic .checked fires no 'change' — sync the state too
+      updateRenderIntroNote();
     }
   } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
 }
@@ -269,6 +272,7 @@ function showStep(n) {
   if (n === 3) {
     renderWordChips();
     redrawPreview(els.preview2);
+    updateRenderIntroNote();
   }
   if (n === 4) {
     requestAnimationFrame(initThumbStep);
@@ -1571,16 +1575,17 @@ async function renderOnce(withWords) {
   setResultLoading(true);
   setStatus('rd-status', `Rendering${withWords ? ' + caption' : ''} · ${activeFitSummary()}…`);
   const body = buildRenderBody(withWords);
-  // Intro card: compose the thumbnail, upload it, attach the intro config.
-  if ($('#rd-intro') && $('#rd-intro').checked) {
+  // Intro card (configured in the Thumbnail step): compose the thumbnail, upload
+  // it, attach the intro config.
+  if (thumb.intro && thumb.intro.enabled) {
     setStatus('rd-status', 'Composing intro card…');
     try { await prepareIntro(); } catch (e) { setStatus('rd-status', 'Intro skipped: ' + e.message, 'err'); }
-    const voiceOn = $('#rd-intro-voice') && $('#rd-intro-voice').checked && !$('#rd-intro-voice').disabled;
+    const ttsOff = $('#th-intro-voice') && $('#th-intro-voice').disabled;  // no Piper voice installed
     body.intro = {
-      transition: $('#rd-intro-trans').value,
-      duration: +$('#rd-intro-dur').value || 4,
+      transition: thumb.intro.transition || 'fade',
+      duration: thumb.intro.duration || 4,
       text: (thumb.text || $('#f-title').value || '').trim(),
-      voice: !!voiceOn,
+      voice: !!thumb.intro.voice && !ttsOff,
     };
     setStatus('rd-status', `Rendering${withWords ? ' + caption' : ''} + intro…`);
   }
@@ -1597,7 +1602,7 @@ async function prepareIntro() {
   off.width = OUT_W; off.height = OUT_H;
   drawThumbnailInto(off.getContext('2d'), OUT_W, OUT_H);
   const blob = await new Promise(res => off.toBlob(res, 'image/png'));
-  if (!blob) throw new Error('could not compose the thumbnail (set it up in Step 7)');
+  if (!blob) throw new Error('could not compose the thumbnail (set it up in the Thumbnail step)');
   const r = await fetch(`/api/intro-image?job_id=${encodeURIComponent(state.jobId)}`, { method: 'POST', body: blob });
   if (!r.ok) throw new Error((await r.text()) || r.statusText);
 }
@@ -1671,8 +1676,16 @@ const thumb = {
   pos: 'bottom', upper: true, shade: true,
   layout: 'two',                         // 'full' (1 box) | 'two' (top 3/8 + bottom 5/8)
   slots: [newThumbSlot(), newThumbSlot()],  // 0 = top/full → box1 ; 1 = bottom → box2
+  intro: { enabled: false, transition: 'fade', duration: 4, voice: true },  // intro card
 };
-function resetThumbSlots() { thumb.slots = [newThumbSlot(), newThumbSlot()]; }
+function resetThumbSlots() {
+  thumb.slots = [newThumbSlot(), newThumbSlot()];
+  // New clip → the composed thumbnail no longer exists, so the intro must be
+  // re-armed deliberately (transition/duration/voice prefs are kept).
+  thumb.intro.enabled = false;
+  const cb = $('#th-intro'); if (cb) cb.checked = false;
+  if (typeof updateRenderIntroNote === 'function') updateRenderIntroNote();
+}
 
 function wireThumb() {
   els.thumbVideo = $('#thumb-video');
@@ -1716,6 +1729,106 @@ function wireThumb() {
     thumb.layout = b.dataset.layout;
     renderThumbLayoutToggle(); renderThumbSlots(); drawThumb();
   }));
+
+  // intro card controls
+  $('#th-intro').addEventListener('change', (e) => { thumb.intro.enabled = e.target.checked; updateRenderIntroNote(); });
+  $('#th-intro-trans').addEventListener('change', (e) => { thumb.intro.transition = e.target.value; updateRenderIntroNote(); });
+  $('#th-intro-dur').addEventListener('input', (e) => { thumb.intro.duration = +e.target.value || 4; });
+  $('#th-intro-voice').addEventListener('change', (e) => { thumb.intro.voice = e.target.checked; });
+  $('#btn-th-voice').addEventListener('click', previewVoice);
+  $('#btn-th-trans').addEventListener('click', playTransitionPreview);
+}
+
+// Synthesize the headline with Piper and play it (intro voice preview).
+async function previewVoice() {
+  const btn = $('#btn-th-voice');
+  if (btn && btn.disabled) return;   // in-flight (or no TTS) — don't stack requests
+  const text = (thumb.text || $('#f-title').value || '').trim();
+  if (!text) { setStatus('th-intro-status', 'No headline text to read.', 'err'); return; }
+  if (btn) btn.disabled = true;
+  setStatus('th-intro-status', 'Synthesizing voice…');
+  try {
+    const r = await fetch('/api/tts-preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    const blob = await r.blob();
+    if (thumb._voiceAudio) {
+      try { thumb._voiceAudio.pause(); } catch (_) {}
+      if (thumb._voiceUrl) URL.revokeObjectURL(thumb._voiceUrl);
+    }
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url);
+    a.onended = () => { if (thumb._voiceUrl === url) { URL.revokeObjectURL(url); thumb._voiceUrl = null; } };
+    thumb._voiceAudio = a;
+    thumb._voiceUrl = url;
+    await a.play();
+    setStatus('th-intro-status', '▶ playing the voiceover', 'ok');
+  } catch (e) {
+    setStatus('th-intro-status', 'Voice failed: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Animate the transition (thumbnail → a content frame) on a small canvas.
+function drawTrans(ctx, A, B, W, H, trans, p) {
+  if (trans === 'fade' || trans === 'dissolve') {
+    ctx.drawImage(B, 0, 0); ctx.globalAlpha = 1 - p; ctx.drawImage(A, 0, 0); ctx.globalAlpha = 1;
+  } else if (trans === 'zoomin') {
+    ctx.drawImage(B, 0, 0);
+    ctx.save(); ctx.globalAlpha = 1 - p; const s = 1 + 0.5 * p;
+    ctx.translate(W / 2, H / 2); ctx.scale(s, s); ctx.drawImage(A, -W / 2, -H / 2); ctx.restore();
+  } else if (trans === 'slideleft') {
+    ctx.drawImage(A, -p * W, 0); ctx.drawImage(B, (1 - p) * W, 0);
+  } else if (trans === 'slideup') {
+    ctx.drawImage(A, 0, -p * H); ctx.drawImage(B, 0, (1 - p) * H);
+  } else if (trans === 'circleopen') {
+    ctx.drawImage(A, 0, 0);
+    ctx.save(); ctx.beginPath(); ctx.arc(W / 2, H / 2, p * Math.hypot(W, H) / 2, 0, Math.PI * 2); ctx.clip();
+    ctx.drawImage(B, 0, 0); ctx.restore();
+  } else {  // cut / fallback
+    ctx.drawImage(p < 0.5 ? A : B, 0, 0);
+  }
+}
+
+function playTransitionPreview() {
+  const cv = $('#th-trans-preview');
+  if (!cv) return;
+  cv.classList.remove('hidden');
+  const W = cv.width, H = cv.height, ctx = cv.getContext('2d');
+  // A = the composed thumbnail
+  const A = document.createElement('canvas'); A.width = W; A.height = H;
+  drawThumbnailInto(A.getContext('2d'), W, H);
+  // B = a content frame (the thumb-video's current frame, cover-fit 9:16)
+  const B = document.createElement('canvas'); B.width = W; B.height = H;
+  const bx = B.getContext('2d'); bx.fillStyle = '#000'; bx.fillRect(0, 0, W, H);
+  if (els.thumbVideo && els.thumbVideo.videoWidth) coverDraw(bx, els.thumbVideo, 0, 0, W, H);
+  const trans = thumb.intro.transition || 'fade';
+  const HOLD = 700, XF = trans === 'cut' ? 1 : 650;
+  const start = performance.now();
+  // Re-click restarts cleanly: only the latest generation keeps animating.
+  const gen = (thumb._transGen = (thumb._transGen || 0) + 1);
+  function frame(now) {
+    if (gen !== thumb._transGen) return;
+    const t = now - start;
+    ctx.clearRect(0, 0, W, H);
+    if (t < HOLD) ctx.drawImage(A, 0, 0);
+    else if (t < HOLD + XF) drawTrans(ctx, A, B, W, H, trans, (t - HOLD) / XF);
+    else { ctx.drawImage(B, 0, 0); if (t < HOLD + XF + HOLD) requestAnimationFrame(frame); return; }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+// Reflect the intro state in the Render step's note.
+function updateRenderIntroNote() {
+  const el = $('#rd-intro-status');
+  if (!el) return;
+  el.innerHTML = thumb.intro.enabled
+    ? `Intro card: <b>ON</b> · ${thumb.intro.transition}${thumb.intro.voice ? ' · 🔊 voice' : ''} — set in the <b>Thumbnail</b> step.`
+    : 'Intro card: off — turn it on in the <b>Thumbnail</b> step (preview voice + transition there).';
 }
 
 function renderThumbLayoutToggle() {
@@ -2169,8 +2282,16 @@ async function openQueueJob(key) {
   $('#f-start').value = job.start || '00:00:00';
   $('#f-end').value = job.end || '';
   $('#f-desc').value = job.description || '';
-  if ($('#ab-prompt-1')) $('#ab-prompt-1').value = job.prompt1 || '';
-  if ($('#ab-prompt-2')) $('#ab-prompt-2').value = job.prompt2 || '';
+  // Prefill the MERGED prompt ([model observation] + [shared context] + [per-box
+  // instruction]) so a manual re-Generate behaves exactly like the batch worker.
+  const _obs = (job.auto_context || '').trim();
+  const _ctx = (job.context || '').trim();
+  const _merge = (p) => {
+    p = (p || '').trim();
+    return p ? [_obs, _ctx, p].filter(Boolean).join(' ') : p;
+  };
+  if ($('#ab-prompt-1')) $('#ab-prompt-1').value = _merge(job.prompt1);
+  if ($('#ab-prompt-2')) $('#ab-prompt-2').value = _merge(job.prompt2);
   if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
   els.video.src = job.video_path;
   updatePlayBtn(false);
