@@ -12,10 +12,24 @@ from models import IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlac
 
 TEMP_DIR = Path(__file__).resolve().parent.parent / "temp"
 
-# Valid ffmpeg xfade transition names we expose (+ 'cut' = plain concat).
+# Valid ffmpeg xfade transition names we expose (+ 'cut' = plain concat,
+# 'crumple' = custom paper-crumple dissolve built below).
 _XFADE_OK = {"fade", "fadeblack", "fadewhite", "dissolve", "slideleft", "slideright",
              "slideup", "slidedown", "circleopen", "circleclose", "zoomin",
-             "wipeleft", "wiperight", "pixelize", "radial"}
+             "wipeleft", "wiperight", "pixelize", "radial", "crumple"}
+
+# "Crumple paper" transition — a custom xfade `expr` (per-pixel A→B switch). The
+# frame is quantized into ~48px facets; each facet flips from the intro (A) to
+# the video (B) at a progress threshold built from a blocky pseudo-noise plus a
+# radial term, so the picture caves in from the edges toward the centre like a
+# sheet of paper being crushed into a ball. P is the 0→1 transition progress.
+_CRUMPLE_EXPR = (
+    "if(gt("
+    "P*1.4-0.4,"
+    "mod(sin(floor(X/48)*12.9898+floor(Y/48)*78.233)*43758.5453,1)*0.55"
+    "+(1-hypot(X-W/2,Y-H/2)/hypot(W/2,H/2))*0.45"
+    "),B,A)"
+)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -34,6 +48,7 @@ OUT_W = 1080
 OUT_H = 1920
 TOP_H = 720      # 3/8 of 1920
 BOTTOM_H = 1200  # 5/8 of 1920
+OUT_FPS = 30     # constant output frame rate (see fps-normalization note in render)
 
 ASPECT_TOP = OUT_W / TOP_H        # 1.5  (3:2)
 ASPECT_BOTTOM = OUT_W / BOTTOM_H  # 0.9  (9:10)
@@ -797,7 +812,13 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
         p.append("[iv][mv]concat=n=2:v=1:a=0[v]")
         p.append("[ia][ma]concat=n=2:v=0:a=1[a]")
     else:
-        p.append(f"[iv][mv]xfade=transition={trans}:duration={xf:.3f}:offset={max(0.0, intro_dur - xf):.3f}[v]")
+        off = max(0.0, intro_dur - xf)
+        if trans == "crumple":
+            xv = (f"[iv][mv]xfade=transition=custom:duration={xf:.3f}:"
+                  f"offset={off:.3f}:expr='{_CRUMPLE_EXPR}'[v]")
+        else:
+            xv = f"[iv][mv]xfade=transition={trans}:duration={xf:.3f}:offset={off:.3f}[v]"
+        p.append(xv)
         p.append(f"[ia][ma]acrossfade=d={xf:.3f}[a]")
 
     tmp_out = TEMP_DIR / f"{job_id}_final.mp4"
@@ -973,6 +994,17 @@ def render(
             f"enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
         )
         last = nxt
+
+    # Normalize to a constant frame rate before captions / keep-trim. The crop
+    # chains mix sources at DIFFERENT rates — the segmented (size-varying) path
+    # builds its slot on a `color` base at OUT_FPS, while the expression / blur
+    # path follows the source rate. A two-box vstack of, say, a 30 fps top and a
+    # 60 fps bottom yields a variable-frame-rate composite; the keep-trim
+    # `select='between(t,…)',setpts=…` then sees inconsistent timestamps and can
+    # drop EVERY video frame (audio survives → an all-black "video"). One fps
+    # pass here gives a clean CFR stream for both the subtitle burn and select.
+    parts.append(f"[{last}]fps={OUT_FPS}[vfps]")
+    last = "vfps"
 
     # Subtitle path escape — Windows drive letters break filter parsing
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")

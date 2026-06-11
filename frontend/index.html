@@ -141,6 +141,10 @@
             <span class="autobox-title">✨ AI Auto-box</span>
             <span class="hint">Each box gets its own prompt — type what it should follow, set the range below, hit its Generate. The AI draws a box track that lands as editable keyframes (drag / resize / delete).</span>
           </div>
+          <div class="autobox-ctx">
+            <label class="ab-ctx-lbl" for="ab-context">Layout context <span class="hint">— shared description prepended to BOTH box prompts. Supports <code>{layout}</code> <code>{side}</code> <code>{other_side}</code> placeholders (resolved per detected segment). Edit here, then re-Generate.</span></label>
+            <textarea id="ab-context" rows="4" placeholder="e.g. this stream's layout CHANGES over the clip — sometimes two areas side by side, sometimes the streamer fills the whole screen… In this part: {layout} AREA 1 is the streamer on the {side}…"></textarea>
+          </div>
           <div class="autobox-row">
             <span class="ab-boxlbl"><span class="dot dot-1"></span> Box 1</span>
             <input type="text" id="ab-prompt-1" placeholder="what Box 1 (top) follows — e.g. the speaker's face">
@@ -334,7 +338,17 @@
 
         <div class="thumb-sec">
           <div class="thumb-sec-head">Headline</div>
-          <button id="btn-thumb-gen" class="primary">✨ Generate ideas</button>
+          <div class="thumb-gen-row">
+            <button id="btn-thumb-gen" class="primary">✨ Generate ideas</button>
+            <label class="thumb-tone-lbl">Tone
+              <select id="thumb-tone" title="voice of the generated headline ideas">
+                <option value="funny">😜 Kocak (lucu)</option>
+                <option value="">Default (punchy)</option>
+                <option value="clickbait">🔥 Clickbait</option>
+                <option value="serious">📋 Serius</option>
+              </select>
+            </label>
+          </div>
           <span class="status" id="thumb-gen-status"></span>
           <div class="thumb-ideas" id="thumb-ideas"></div>
           <textarea id="thumb-text" rows="2" placeholder="Type, or pick a generated idea. Enter = new line."></textarea>
@@ -371,6 +385,7 @@
           <div class="intro-opts">
             <label><span>Transition</span>
               <select id="th-intro-trans">
+                <option value="crumple">📄 Crumple paper</option>
                 <option value="fade">Crossfade</option>
                 <option value="dissolve">Dissolve</option>
                 <option value="zoomin">Zoom in</option>

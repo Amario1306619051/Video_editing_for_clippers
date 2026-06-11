@@ -229,6 +229,7 @@ class ThumbnailTextRequest(BaseModel):
     context: str = ""           # title + description + transcript (whatever the UI has)
     n: int = 5                  # how many options to return
     language: str = ""          # optional hint; empty = match the content language
+    tone: str = ""              # "" default | "funny" (kocak) | "serious" | "clickbait"
 
 
 class ThumbnailTextResponse(BaseModel):
@@ -248,3 +249,8 @@ class QueueJobPatch(BaseModel):
     description: Optional[str] = None
     box1: Optional[list[Keyframe]] = None
     box2: Optional[list[Keyframe]] = None
+    # Editable layout context + per-box prompts, so re-Generate from the UI uses
+    # the same (now user-tuned) text the batch ran with.
+    context: Optional[str] = None
+    prompt1: Optional[str] = None
+    prompt2: Optional[str] = None

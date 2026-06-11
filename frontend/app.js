@@ -38,6 +38,7 @@ const state = {
   result: null,
   activeQueueKey: null,                   // batch-queue job currently loaded (null = ad-hoc)
   queueSig: null,                         // signature of last auto-saved queue state
+  autoObs: '',                            // model's mid-clip observation (prepended to autobox prompts)
   sounds: [],                             // soundboard library (from /api/soundboard)
   sfx: [],                                // SFX placements for this clip (sent at render)
   sfxPreview: null,                       // currently-playing preview Audio
@@ -1315,8 +1316,14 @@ function onAbDragMove(e) {
 async function doAutoBox(n) {
   if (!state.jobId) return;
   const input = $(`#ab-prompt-${n}`);
-  const prompt = (input ? input.value : '').trim();
-  if (!prompt) { setStatus('ab-status', `Type what Box ${n} should follow first`, 'err'); return; }
+  const raw = (input ? input.value : '').trim();
+  if (!raw) { setStatus('ab-status', `Type what Box ${n} should follow first`, 'err'); return; }
+  // Merge [model observation] + [shared layout context] + [per-box instruction],
+  // matching the batch worker. The context carries the {layout}/{side}
+  // placeholders, which the backend resolves per detected segment.
+  const obs = (state.autoObs || '').trim();
+  const ctx = ($('#ab-context') ? $('#ab-context').value : '').trim();
+  const prompt = [obs, ctx, raw].filter(Boolean).join(' ');
   const dur = state.source.duration;
   const t0 = Math.max(0, state.autoRange.start || 0);
   const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
@@ -1402,6 +1409,8 @@ async function doDownload() {
     state.sfx = [];                // placements are per-clip
     state.ills = [];               // cutaways are per-clip
     state.keep = []; state.keepA = null;  // keep-windows are per-clip
+    state.autoObs = '';            // no model observation for an ad-hoc clip
+    if ($('#ab-context')) $('#ab-context').value = '';   // context is per-clip
     resetThumbSlots();             // thumbnail backgrounds reference the old clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
@@ -1685,7 +1694,7 @@ const thumb = {
   layout: 'two',                         // 'full' (1 box) | 'two' (top 3/8 + bottom 5/8)
   effect: 'none',                        // finish over the whole thumbnail (crumple/grain/vignette)
   slots: [newThumbSlot(), newThumbSlot()],  // 0 = top/full → box1 ; 1 = bottom → box2
-  intro: { enabled: false, transition: 'fade', duration: 4, voice: true, engine: 'gtts' },  // intro card
+  intro: { enabled: false, transition: 'crumple', duration: 4, voice: true, engine: 'gtts' },  // intro card
 };
 function resetThumbSlots() {
   thumb.slots = [newThumbSlot(), newThumbSlot()];
@@ -1801,6 +1810,20 @@ function drawTrans(ctx, A, B, W, H, trans, p) {
     ctx.drawImage(A, 0, 0);
     ctx.save(); ctx.beginPath(); ctx.arc(W / 2, H / 2, p * Math.hypot(W, H) / 2, 0, Math.PI * 2); ctx.clip();
     ctx.drawImage(B, 0, 0); ctx.restore();
+  } else if (trans === 'crumple') {
+    // Mirror the backend's _CRUMPLE_EXPR: ~48px (scaled) facets flip A→B at a
+    // threshold = blocky pseudo-noise + radial term, so it caves edge→centre.
+    ctx.drawImage(A, 0, 0);
+    const F = Math.max(8, Math.round(W / 11));    // facet size, ~ the 48px backend grid scaled to the preview
+    const cx = W / 2, cy = H / 2, maxR = Math.hypot(W / 2, H / 2);
+    for (let gy = 0; gy < H; gy += F) {
+      for (let gx = 0; gx < W; gx += F) {
+        const noise = Math.abs(Math.sin(Math.floor(gx / F) * 12.9898 + Math.floor(gy / F) * 78.233) * 43758.5453) % 1;
+        const radial = 1 - Math.hypot(gx + F / 2 - cx, gy + F / 2 - cy) / maxR;
+        const thresh = noise * 0.55 + radial * 0.45;
+        if (p * 1.4 - 0.4 > thresh) ctx.drawImage(B, gx, gy, F, F, gx, gy, F, F);
+      }
+    }
   } else {  // cut / fallback
     ctx.drawImage(p < 0.5 ? A : B, 0, 0);
   }
@@ -2225,7 +2248,8 @@ async function doThumbGen() {
   if (btn) btn.disabled = true;
   setStatus('thumb-gen-status', 'Generating headline ideas… (first call may warm the model)');
   try {
-    const res = await apiPost('/api/thumbnail-text', { context, n: 6 });
+    const tone = $('#thumb-tone') ? $('#thumb-tone').value : '';
+    const res = await apiPost('/api/thumbnail-text', { context, n: 6, tone });
     const titles = res.titles || [];
     renderThumbIdeas(titles);
     setStatus('thumb-gen-status',
@@ -2401,16 +2425,16 @@ async function openQueueJob(key) {
   $('#f-start').value = job.start || '00:00:00';
   $('#f-end').value = job.end || '';
   $('#f-desc').value = job.description || '';
-  // Prefill the MERGED prompt ([model observation] + [shared context] + [per-box
-  // instruction]) so a manual re-Generate behaves exactly like the batch worker.
-  const _obs = (job.auto_context || '').trim();
-  const _ctx = (job.context || '').trim();
-  const _merge = (p) => {
-    p = (p || '').trim();
-    return p ? [_obs, _ctx, p].filter(Boolean).join(' ') : p;
-  };
-  if ($('#ab-prompt-1')) $('#ab-prompt-1').value = _merge(job.prompt1);
-  if ($('#ab-prompt-2')) $('#ab-prompt-2').value = _merge(job.prompt2);
+  // Context + per-box prompts are EDITABLE and kept SEPARATE in the UI. The
+  // shared layout context (with {layout}/{side} placeholders) goes in its own
+  // field; the box prompts hold only the short per-box instruction. doAutoBox
+  // re-merges [model observation] + [context] + [per-box prompt] at Generate
+  // time — exactly the batch worker's order. (auto_context = the model's own
+  // mid-clip observation, hidden but still prepended.)
+  state.autoObs = (job.auto_context || '').trim();
+  if ($('#ab-context')) $('#ab-context').value = job.context || '';
+  if ($('#ab-prompt-1')) $('#ab-prompt-1').value = job.prompt1 || '';
+  if ($('#ab-prompt-2')) $('#ab-prompt-2').value = job.prompt2 || '';
   if ($('#rd-start')) { $('#rd-start').value = ''; $('#rd-end').value = ''; }
   els.video.src = job.video_path;
   updatePlayBtn(false);
@@ -2427,6 +2451,9 @@ function queueSig() {
     t: ($('#f-title').value || ''),
     b1: state.keyframes[1],
     b2: state.keyframes[2],
+    ctx: ($('#ab-context') ? $('#ab-context').value : ''),
+    p1: ($('#ab-prompt-1') ? $('#ab-prompt-1').value : ''),
+    p2: ($('#ab-prompt-2') ? $('#ab-prompt-2').value : ''),
   });
 }
 
@@ -2440,6 +2467,9 @@ async function autosaveQueue() {
       title: $('#f-title').value.trim() || 'clip',
       box1: state.keyframes[1] || [],
       box2: state.keyframes[2] || [],
+      context: $('#ab-context') ? $('#ab-context').value : '',
+      prompt1: $('#ab-prompt-1') ? $('#ab-prompt-1').value : '',
+      prompt2: $('#ab-prompt-2') ? $('#ab-prompt-2').value : '',
     });
     setStatus('queue-status', 'Progress saved ✓', 'ok');
   } catch (e) { /* try again next tick — keep the new sig so we don't spin */ }
@@ -3190,6 +3220,19 @@ function wireTrim() {
     renderTrimTrack();
   });
   v.addEventListener('timeupdate', () => {
+    // During PLAYBACK, skip over the parts that the render will cut, so the
+    // preview plays EXACTLY the kept windows — what you watch == what you
+    // download. (Only while playing: manual scrubbing into a cut still shows it,
+    // tinted, so you can see what you're dropping.)
+    if (!v.paused && state.keep.length) {
+      const cur = v.currentTime || 0;
+      const inKeep = state.keep.some(w => cur >= w.start - 1e-3 && cur < w.end);
+      if (!inKeep) {
+        const next = state.keep.filter(w => w.start > cur).sort((a, b) => a.start - b.start)[0];
+        if (next) { v.currentTime = next.start; }      // jump to the next kept window
+        else { v.pause(); v.currentTime = state.keep[state.keep.length - 1].end; }  // past the last keep → stop
+      }
+    }
     const t = $('#trim-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
     const scr = $('#trim-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
     updateTrimCursor();
