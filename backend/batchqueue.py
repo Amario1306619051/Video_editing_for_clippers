@@ -533,6 +533,10 @@ def _process_one(job: dict) -> None:
                     box1, box2 = autobox.merge_double_gaps(
                         box1, box2, w_, h_,
                         classify=lambda t: autobox.classify_fullscreen_owner(src, t, w_, h_))
+                    # the two split panels often overlap a little on the seam
+                    # (streamer box too wide / content box too far in) → snap
+                    # both edges to a shared divider so the crops don't double up
+                    box1, box2 = autobox.resolve_split_overlap(box1, box2, w_, h_)
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,
