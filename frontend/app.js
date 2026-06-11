@@ -591,6 +591,64 @@ function onTimeUpdate() {
   redrawPreviews();
 }
 
+// ── segment duration editing ──
+// A segment runs [kf[idx].t, kf[idx+1].t). Editing its START moves this kf's t;
+// editing its END moves the NEXT kf's t — both clamped between the neighboring
+// keyframes so the order (and every other segment) stays intact. This is how a
+// segment is lengthened/shortened from the list.
+function kfTimeBounds(n, idx, which) {
+  const kfs = state.keyframes[n];
+  const dur = state.source ? state.source.duration : Infinity;
+  const EPS = 0.05;
+  if (which === 'start') {
+    const lo = idx > 0 ? kfs[idx - 1].t + EPS : 0;
+    const hi = (idx + 1 < kfs.length ? kfs[idx + 1].t : dur) - EPS;
+    return [lo, Math.max(lo, hi)];
+  }
+  // 'end' edits kf[idx+1].t
+  const lo = kfs[idx].t + EPS;
+  const hi = (idx + 2 < kfs.length ? kfs[idx + 2].t : dur) - EPS;
+  return [lo, Math.max(lo, hi)];
+}
+
+function startKfTimeEdit(span) {
+  const n = +span.dataset.box, idx = +span.dataset.idx, which = span.dataset.which;
+  const kfs = state.keyframes[n];
+  const target = which === 'start' ? kfs[idx] : kfs[idx + 1];
+  if (!target) return;
+  const [lo, hi] = kfTimeBounds(n, idx, which);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.step = '0.1';
+  input.min = lo.toFixed(2);
+  input.max = hi.toFixed(2);
+  input.value = target.t.toFixed(2);
+  input.className = 'kf-tedit-input';
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const v = parseFloat(input.value);
+    if (!isNaN(v)) {
+      target.t = Math.min(hi, Math.max(lo, v));
+      kfs.sort((a, b) => a.t - b.t);
+      setStatus('tr-status',
+        `Box ${n} segment ${which} → ${target.t.toFixed(2)}s (drag the playhead to check)`, 'ok');
+    }
+    renderTimeline();
+    redrawOverlay();
+    redrawPreviews();
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') commit();
+    else if (ev.key === 'Escape') { done = true; renderTimeline(); }
+  });
+  input.addEventListener('blur', commit);
+}
+
 function updateKfListHighlight() {
   for (const n of [1, 2]) {
     const ol = document.getElementById(`kf-items-${n}`);
@@ -659,11 +717,23 @@ function renderKfList() {
       const fitLbl = fit === 'blur_pad' ? 'BLUR PAD' : 'COVER';
       const isGap = !!kf.gap;
       const isCur = state.currentTime >= kf.t && (isLast || state.currentTime < endT);
+      // Editable start/end — click a time to lengthen/shorten the segment
+      // (start = this kf's t, end = the NEXT kf's t; clip end isn't editable).
+      const timeHtml = `
+        <span class="kf-seg-time">
+          <span class="kf-tedit" data-box="${n}" data-idx="${idx}" data-which="start"
+                title="Click to edit when this segment STARTS (lengthen/shorten)">${formatTime(kf.t)}</span>
+          →
+          ${isLast ? 'end'
+                   : `<span class="kf-tedit" data-box="${n}" data-idx="${idx}" data-which="end"
+                            title="Click to edit when this segment ENDS (moves the next keyframe)">${formatTime(endT)}</span>`}
+        </span>
+        <span class="kf-onscreen" title="this segment is what's on screen at the playhead right now">▶ ON SCREEN</span>`;
       // Gap segment: rendered black, can be removed to restore prior kf's extension.
       if (isGap) {
         return `
           <li class="gap ${isCur ? 'current' : ''}">
-            <span class="kf-seg-time">${formatTime(kf.t)} → ${isLast ? 'end' : formatTime(endT)}</span>
+            ${timeHtml}
             <span class="kf-seg-dims kf-seg-empty">— empty (rendered black) —</span>
             <span class="kf-seg-actions">
               <button data-act="seek" data-box="${n}" data-idx="${idx}" title="Seek to the start of the gap">▶ seek</button>
@@ -674,7 +744,7 @@ function renderKfList() {
       }
       return `
         <li class="${isCur ? 'current' : ''}">
-          <span class="kf-seg-time">${formatTime(kf.t)} → ${isLast ? 'end' : formatTime(endT)}</span>
+          ${timeHtml}
           <span class="kf-seg-dims">${Math.round(kf.w)}×${Math.round(kf.h)} @(${Math.round(kf.x)},${Math.round(kf.y)})</span>
           <span class="kf-seg-mode ${cls}">${tag}</span>
           <span class="kf-seg-actions">
@@ -690,6 +760,8 @@ function renderKfList() {
 }
 
 function onKfListClick(e) {
+  const tedit = e.target.closest('.kf-tedit');
+  if (tedit) { startKfTimeEdit(tedit); return; }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const act = btn.dataset.act;
@@ -1327,7 +1399,7 @@ async function doAutoBox(n) {
   const dur = state.source.duration;
   const t0 = Math.max(0, state.autoRange.start || 0);
   const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
-  const step = +els.abDensity.value || 0.2;
+  const step = +els.abDensity.value || 0.4;
   const btn = document.querySelector(`.ab-gen[data-box="${n}"]`);
   if (btn) btn.disabled = true;
   setStatus('ab-status',
@@ -2342,9 +2414,9 @@ async function refreshQueue() {
 
 function statusBadge(s) {
   const label = {
-    pending: 'queued', downloading: 'downloading', predicting: 'boxing',
-    ready: 'ready', render_queued: 'render queued', rendering: 'rendering',
-    done: 'done', error: 'error',
+    pending: 'queued', downloading: 'downloading', downloaded: 'boxing queued',
+    predicting: 'boxing', ready: 'ready', render_queued: 'render queued',
+    rendering: 'rendering', done: 'done', error: 'error',
   }[s] || s;
   return `<span class="q-badge ${s}">${label}</span>`;
 }
@@ -2359,7 +2431,7 @@ function renderQueueList(jobs) {
     return;
   }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
-  const working = (c.pending || 0) + (c.downloading || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
+  const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
   ul.innerHTML = jobs.map(j => {
     const active = j.key === state.activeQueueKey ? ' active' : '';

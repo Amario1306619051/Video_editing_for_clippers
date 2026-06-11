@@ -209,7 +209,7 @@ class AutoBoxRequest(BaseModel):
     t_start: float = 0.0
     t_end: Optional[float] = None
     box: int = 1
-    step_seconds: float = 0.2   # timing PRECISION — sampling is adaptive (~1s grid, denser only at changes)
+    step_seconds: float = 0.4   # timing PRECISION — sampling is adaptive (~1s grid, denser only at changes)
     padding: float = 0.05       # expand each detected box by this fraction per side
     smooth: bool = True         # damp frame-to-frame jitter
     lock_size: bool = True      # lock one box size across the range (pan only) — stable framing
