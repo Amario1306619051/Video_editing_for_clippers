@@ -761,7 +761,7 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
     if getattr(intro, "voice", True) and (intro.text or "").strip() and tts.enabled():
         cand = TEMP_DIR / f"{job_id}_intro.wav"
         try:
-            tts.synthesize(intro.text, cand)
+            tts.synthesize(intro.text, cand, engine=getattr(intro, "engine", "gtts"))
             voice_wav = cand
         except Exception as e:  # noqa: BLE001
             print(f"[RENDER] TTS failed (intro stays silent): {e}")

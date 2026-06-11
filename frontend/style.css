@@ -1113,3 +1113,13 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .intro-prev-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .th-trans-canvas { width: 120px; height: 213px; background: #000; border: 1px solid var(--border); border-radius: 4px; display: block; }
 .th-trans-canvas.hidden { display: none; }
+
+/* sound-effects timeline: draggable bars (range layers) + pins (one-shots) */
+.sfx-track-wrap { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.sfx-bars { position: relative; height: 40px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; user-select: none; }
+.sfx-bar { position: absolute; top: 3px; bottom: 3px; background: rgba(255,158,94,.22); border: 1px solid var(--box-2, #ff9e5e); border-radius: 3px; cursor: grab; min-width: 12px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.sfx-bar-name { font-size: 10px; color: var(--text-dim); pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 8px; }
+.sfx-bar-h { position: absolute; top: 0; bottom: 0; width: 8px; background: var(--box-2, #ff9e5e); cursor: ew-resize; opacity: .7; }
+.sfx-bar-l { left: 0; }
+.sfx-bar-r { right: 0; }
+.sfx-pin { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; color: var(--accent); font-size: 16px; cursor: grab; transform: translateX(-50%); padding: 0 4px; }

@@ -114,12 +114,14 @@ class IntroConfig(BaseModel):
     duration: float = 4.0
     text: str = ""
     voice: bool = True
+    engine: str = "gtts"   # "gtts" (Google voice, online) | "piper" (offline)
 
 
 class TtsRequest(BaseModel):
     """Text to synthesize for the intro voiceover preview. Capped — a pasted
     transcript instead of a headline would tie Piper up for minutes."""
     text: str = Field(..., max_length=500)
+    engine: str = "gtts"   # "gtts" (Google voice, online) | "piper" (offline)
 
 
 class KeepSegment(BaseModel):
@@ -185,6 +187,15 @@ class RenderResponse(BaseModel):
 
 class CleanupRequest(BaseModel):
     job_id: str
+
+
+class DetectSilenceRequest(BaseModel):
+    """AI trim helper: find quiet/dead-air stretches in the clip's audio.
+    `noise_db` = silence threshold in dBFS (more negative = stricter),
+    `min_dur` = minimum quiet length in seconds to count."""
+    job_id: str
+    noise_db: int = -35
+    min_dur: float = 1.0
 
 
 class AutoBoxRequest(BaseModel):

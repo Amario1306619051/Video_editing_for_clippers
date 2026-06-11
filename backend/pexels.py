@@ -85,7 +85,13 @@ def search(query: str, per_page: Optional[int] = None) -> list[dict]:
 
 
 def download_pick(job_id: str, url: str) -> Path:
-    """Download one picked image to temp/, deduped by URL hash. Returns the path."""
+    """Download one picked image to temp/, deduped by URL hash. Returns the path.
+    A `/temp/...` url is a user-UPLOADED image already on disk — used directly."""
+    if url.startswith("/temp/"):
+        local = TEMP_DIR / Path(url).name        # Path().name strips any ../
+        if not local.exists():
+            raise FileNotFoundError(f"uploaded image missing: {url}")
+        return local
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
     dest = TEMP_DIR / f"{job_id}_ill_{digest}.jpg"
     if dest.exists():

@@ -46,6 +46,7 @@ const state = {
   keep: [],                               // keep-windows {start,end} (everything else cut at render)
   keepA: null,                            // pending in-point while marking A→B
   keepDrag: null,                         // drag state for a keep block
+  sfxDrag: null,                          // drag state for a sound bar/pin
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -232,7 +233,7 @@ async function initCapabilities() {
     }
     if (!caps.tts) {
       const vc = $('#th-intro-voice');
-      if (vc) { vc.checked = false; vc.disabled = true; vc.closest('label').title = 'No Piper voice installed (clipper/voices/*.onnx) — intro will be silent.'; }
+      if (vc) { vc.checked = false; vc.disabled = true; vc.closest('label').title = 'No TTS engine — install gTTS (pip install gTTS) or drop a Piper voice into clipper/voices/. Intro will be silent.'; }
       const pv = $('#btn-th-voice'); if (pv) pv.disabled = true;
       thumb.intro.voice = false;   // programmatic .checked fires no 'change' — sync the state too
       updateRenderIntroNote();
@@ -474,14 +475,20 @@ function upsertKeyframe(n, box, t) {
   kfs.sort((a, b) => a.t - b.t);
 }
 
+function defaultFit(n) {
+  // owner's defaults: box1 (streamer) = cover, box2 (content) = blur_pad —
+  // the content keeps its full aspect with blurred padding
+  return n === 2 ? 'blur_pad' : 'cover';
+}
+
 function inheritFit(n, t) {
   const kfs = state.keyframes[n];
-  if (!kfs.length) return 'cover';
+  if (!kfs.length) return defaultFit(n);
   let best = null;
   for (const k of kfs) {
     if (k.t <= t && (!best || k.t > best.t)) best = k;
   }
-  return (best ? best.fit : kfs[0].fit) || 'cover';
+  return (best ? best.fit : kfs[0].fit) || defaultFit(n);
 }
 
 // Which fit mode applies at currentTime for box n, mirroring backend per-segment logic.
@@ -1586,6 +1593,7 @@ async function renderOnce(withWords) {
       duration: thumb.intro.duration || 4,
       text: (thumb.text || $('#f-title').value || '').trim(),
       voice: !!thumb.intro.voice && !ttsOff,
+      engine: thumb.intro.engine || 'gtts',
     };
     setStatus('rd-status', `Rendering${withWords ? ' + caption' : ''} + intro…`);
   }
@@ -1675,8 +1683,9 @@ const thumb = {
   text: '', font: 'Anton', size: 130, color: '#ffffff', stroke: '#000000',
   pos: 'bottom', upper: true, shade: true,
   layout: 'two',                         // 'full' (1 box) | 'two' (top 3/8 + bottom 5/8)
+  effect: 'none',                        // finish over the whole thumbnail (crumple/grain/vignette)
   slots: [newThumbSlot(), newThumbSlot()],  // 0 = top/full → box1 ; 1 = bottom → box2
-  intro: { enabled: false, transition: 'fade', duration: 4, voice: true },  // intro card
+  intro: { enabled: false, transition: 'fade', duration: 4, voice: true, engine: 'gtts' },  // intro card
 };
 function resetThumbSlots() {
   thumb.slots = [newThumbSlot(), newThumbSlot()];
@@ -1721,6 +1730,8 @@ function wireThumb() {
   $('#thumb-pos').addEventListener('change', (e) => { thumb.pos = e.target.value; drawThumb(); });
   $('#thumb-upper').addEventListener('change', (e) => { thumb.upper = e.target.checked; drawThumb(); });
   $('#thumb-shade').addEventListener('change', (e) => { thumb.shade = e.target.checked; drawThumb(); });
+  const eff = $('#thumb-effect');
+  if (eff) eff.addEventListener('change', (e) => { thumb.effect = e.target.value; drawThumb(); });
   $('#btn-thumb-gen').addEventListener('click', doThumbGen);
   $('#btn-thumb-dl').addEventListener('click', downloadThumb);
 
@@ -1735,6 +1746,8 @@ function wireThumb() {
   $('#th-intro-trans').addEventListener('change', (e) => { thumb.intro.transition = e.target.value; updateRenderIntroNote(); });
   $('#th-intro-dur').addEventListener('input', (e) => { thumb.intro.duration = +e.target.value || 4; });
   $('#th-intro-voice').addEventListener('change', (e) => { thumb.intro.voice = e.target.checked; });
+  const eng = $('#th-intro-engine');
+  if (eng) eng.addEventListener('change', (e) => { thumb.intro.engine = e.target.value; });
   $('#btn-th-voice').addEventListener('click', previewVoice);
   $('#btn-th-trans').addEventListener('click', playTransitionPreview);
 }
@@ -1750,7 +1763,7 @@ async function previewVoice() {
   try {
     const r = await fetch('/api/tts-preview', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, engine: (thumb.intro && thumb.intro.engine) || 'gtts' }),
     });
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     const blob = await r.blob();
@@ -1975,6 +1988,112 @@ function drawThumbnailInto(ctx, W, H) {
   thumbSlotRects(W, H).forEach((r, i) => drawThumbSlot(ctx, thumb.slots[i], r[0], r[1], r[2], r[3]));
   if (thumb.shade) drawThumbShade(ctx, W, H);
   drawThumbText(ctx, W, H);
+  applyThumbEffect(ctx, W, H);
+}
+
+// ── thumbnail finish effects (crumpled paper / grain / vignette) ──
+// Procedural, deterministic (seeded RNG) and cached per (effect, size) so the
+// preview doesn't shimmer on every redraw. Drawn OVER everything — the paper
+// holds the printed image, so the texture covers photo + text alike.
+const _fxCache = {};
+
+function _seededRand(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function _crumpleLayer(W, H) {
+  const key = `crumple_${W}x${H}`;
+  if (_fxCache[key]) return _fxCache[key];
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  const rnd = _seededRand(1306619051);
+  x.fillStyle = 'rgb(128,128,128)';            // neutral for 'overlay' blending
+  x.fillRect(0, 0, W, H);
+  // faceted shading: random triangles a touch lighter/darker than neutral
+  for (let i = 0; i < 220; i++) {
+    const cx = rnd() * W, cy = rnd() * H, r = (0.04 + rnd() * 0.16) * Math.max(W, H);
+    const a0 = rnd() * Math.PI * 2, a1 = a0 + 0.6 + rnd() * 1.6, a2 = a1 + 0.6 + rnd() * 1.6;
+    const tone = 128 + (rnd() - 0.5) * 56;
+    x.fillStyle = `rgba(${tone | 0},${tone | 0},${tone | 0},0.5)`;
+    x.beginPath();
+    x.moveTo(cx + Math.cos(a0) * r, cy + Math.sin(a0) * r);
+    x.lineTo(cx + Math.cos(a1) * r, cy + Math.sin(a1) * r);
+    x.lineTo(cx + Math.cos(a2) * r, cy + Math.sin(a2) * r);
+    x.closePath(); x.fill();
+  }
+  // sharp creases: long thin light/dark line pairs (the fold catches the light)
+  for (let i = 0; i < 26; i++) {
+    const x0 = rnd() * W, y0 = rnd() * H;
+    const ang = rnd() * Math.PI * 2, len = (0.3 + rnd() * 0.7) * Math.max(W, H);
+    const x1 = x0 + Math.cos(ang) * len, y1 = y0 + Math.sin(ang) * len;
+    const nx = -Math.sin(ang), ny = Math.cos(ang);
+    const lw = Math.max(1, W / 360);
+    x.lineWidth = lw;
+    x.strokeStyle = 'rgba(235,235,235,0.55)';
+    x.beginPath(); x.moveTo(x0, y0); x.lineTo(x1, y1); x.stroke();
+    x.strokeStyle = 'rgba(30,30,30,0.45)';
+    x.beginPath(); x.moveTo(x0 + nx * lw, y0 + ny * lw); x.lineTo(x1 + nx * lw, y1 + ny * lw); x.stroke();
+  }
+  // soften the facets a touch
+  const soft = document.createElement('canvas');
+  soft.width = W; soft.height = H;
+  const sx = soft.getContext('2d');
+  sx.filter = `blur(${Math.max(1, W / 540)}px)`;
+  sx.drawImage(c, 0, 0);
+  _fxCache[key] = soft;
+  return soft;
+}
+
+function _grainLayer(W, H) {
+  const key = `grain_${W}x${H}`;
+  if (_fxCache[key]) return _fxCache[key];
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  const img = x.createImageData(W, H);
+  const rnd = _seededRand(20260611);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 96 + rnd() * 64;          // mid-gray noise
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  _fxCache[key] = c;
+  return c;
+}
+
+function applyThumbEffect(ctx, W, H) {
+  const fx = thumb.effect || 'none';
+  if (fx === 'none') return;
+  if (fx.includes('crumple')) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(_crumpleLayer(W, H), 0, 0);
+    ctx.restore();
+  }
+  if (fx.includes('grain')) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(_grainLayer(W, H), 0, 0);
+    ctx.restore();
+  }
+  if (fx.includes('vignette')) {
+    ctx.save();
+    const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45,
+                                       W / 2, H / 2, Math.hypot(W, H) / 2);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
 }
 
 // cover / contain a SOURCE REGION (sx,sy,sw,sh) of `src` into a dest rect.
@@ -2378,13 +2497,19 @@ function wireSfx() {
   v.addEventListener('loadedmetadata', () => {
     const scr = $('#sfx-scrubber'); if (scr) scr.max = v.duration || 0;
     const d = $('#sfx-dur'); if (d) d.textContent = formatTime(v.duration || 0);
+    renderSfxTrack(); drawSfxPreview();
   });
+  v.addEventListener('loadeddata', drawSfxPreview);
+  v.addEventListener('seeked', () => { resetSfxAudio(); drawSfxPreview(); });
   v.addEventListener('timeupdate', () => {
     const t = $('#sfx-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
     const scr = $('#sfx-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
+    updateSfxCursor();
+    drawSfxPreview();
+    syncSfxAudio();
   });
   v.addEventListener('play', () => { const b = $('#sfx-play'); if (b) b.textContent = '❚❚'; });
-  v.addEventListener('pause', () => { const b = $('#sfx-play'); if (b) b.textContent = '▶'; });
+  v.addEventListener('pause', () => { const b = $('#sfx-play'); if (b) b.textContent = '▶'; resetSfxAudio(); });
   $('#sfx-play').addEventListener('click', () => { if (v.paused) v.play(); else v.pause(); });
   $('#sfx-scrubber').addEventListener('input', (e) => { if (v.duration) v.currentTime = +e.target.value; });
   $('#btn-sfx-import').addEventListener('click', () => $('#sfx-file').click());
@@ -2392,7 +2517,136 @@ function wireSfx() {
   $('#sfx-rs-cur').addEventListener('click', () => { $('#sfx-rs').value = (v.currentTime || 0).toFixed(2); });
   $('#sfx-re-cur').addEventListener('click', () => { $('#sfx-re').value = (v.currentTime || 0).toFixed(2); });
   $('#btn-sfx-addrange').addEventListener('click', addSfxRange);
+  const tr = $('#sfx-track');
+  if (tr) {
+    tr.addEventListener('mousedown', onSfxTrackDown);
+    tr.addEventListener('dblclick', onSfxTrackDblClick);
+    window.addEventListener('mousemove', onSfxDragMove);
+    window.addEventListener('mouseup', () => { if (state.sfxDrag) { state.sfxDrag = null; renderSfxList(); } });
+  }
   loadSounds();
+}
+
+// ── sfx timeline bars: drag body to move, edges to change start/end ──
+function sfxDur() {
+  return (els.sfxVideo && els.sfxVideo.duration) ? els.sfxVideo.duration
+    : (state.source ? state.source.duration : 0) || 0;
+}
+
+function renderSfxTrack() {
+  const track = $('#sfx-track');
+  if (!track) return;
+  const dur = sfxDur() || 1;
+  track.innerHTML = state.sfx.map((p, i) => {
+    if (p.kind === 'range') {
+      const left = (p.t / dur) * 100;
+      const width = Math.max(1.2, (((p.t_end ?? p.t + 1) - p.t) / dur) * 100);
+      return `<div class="sfx-bar" data-i="${i}" style="left:${left}%;width:${width}%"
+        title="${escapeHtml(soundName(p.sound_id))} ${p.t.toFixed(1)}–${(p.t_end ?? 0).toFixed(1)}s — drag to move, edges to resize, double-click to remove">
+        <span class="sfx-bar-h sfx-bar-l"></span>
+        <span class="sfx-bar-name">${escapeHtml(soundName(p.sound_id))}</span>
+        <span class="sfx-bar-h sfx-bar-r"></span>
+      </div>`;
+    }
+    const left = (p.t / dur) * 100;
+    return `<div class="sfx-pin" data-i="${i}" style="left:${left}%"
+      title="${escapeHtml(soundName(p.sound_id))} @ ${p.t.toFixed(1)}s — drag to move, double-click to remove">▾</div>`;
+  }).join('') + '<div class="ill-cursor" id="sfx-cursor"></div>';
+  updateSfxCursor();
+}
+
+function updateSfxCursor() {
+  const cur = $('#sfx-cursor');
+  if (!cur) return;
+  const dur = sfxDur() || 1;
+  cur.style.left = ((els.sfxVideo ? (els.sfxVideo.currentTime || 0) : 0) / dur) * 100 + '%';
+}
+
+function onSfxTrackDown(e) {
+  const el = e.target.closest('.sfx-bar, .sfx-pin');
+  if (!el) return;
+  e.preventDefault();
+  const i = +el.dataset.i;
+  const p = state.sfx[i];
+  if (!p) return;
+  const rect = $('#sfx-track').getBoundingClientRect();
+  let mode = 'move';
+  if (p.kind === 'range' && el.classList.contains('sfx-bar')) {
+    const r = el.getBoundingClientRect();
+    if (e.target.classList.contains('sfx-bar-l') || e.clientX - r.left < 8) mode = 'left';
+    else if (e.target.classList.contains('sfx-bar-r') || r.right - e.clientX < 8) mode = 'right';
+  }
+  state.sfxDrag = { i, mode, startX: e.clientX, trackW: rect.width, t0: p.t, t1: p.t_end ?? p.t };
+}
+
+function onSfxDragMove(e) {
+  const d = state.sfxDrag;
+  if (!d) return;
+  const p = state.sfx[d.i];
+  if (!p) { state.sfxDrag = null; return; }
+  const dur = sfxDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const MIN = 0.15;
+  if (p.kind !== 'range' || d.mode === 'move') {
+    const len = p.kind === 'range' ? (d.t1 - d.t0) : 0;
+    let ns = Math.max(0, Math.min(d.t0 + dt, dur - len));
+    p.t = +ns.toFixed(2);
+    if (p.kind === 'range') p.t_end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'left') {
+    p.t = +Math.max(0, Math.min(d.t0 + dt, (p.t_end ?? dur) - MIN)).toFixed(2);
+  } else {
+    p.t_end = +Math.max(p.t + MIN, Math.min(d.t1 + dt, dur)).toFixed(2);
+  }
+  renderSfxTrack();
+}
+
+function onSfxTrackDblClick(e) {
+  const el = e.target.closest('.sfx-bar, .sfx-pin');
+  if (!el) return;
+  state.sfx.splice(+el.dataset.i, 1);
+  renderSfxTrack(); renderSfxList();
+  setStatus('sfx-status', 'Placement removed.', 'ok');
+}
+
+// ── audible preview: placed sounds play in sync while the sfx video plays ──
+let sfxLive = [];   // [{p, audio}] currently-sounding range layers
+
+function resetSfxAudio() {
+  for (const l of sfxLive) { try { l.audio.pause(); } catch (_) {} }
+  sfxLive = [];
+  for (const p of state.sfx) p._fired = false;
+}
+
+function syncSfxAudio() {
+  const v = els.sfxVideo;
+  if (!v || v.paused) return;
+  const t = v.currentTime || 0;
+  for (const p of state.sfx) {
+    const vol = Math.max(0, Math.min(1, p.volume == null ? 1 : p.volume));
+    if (p.kind === 'range') {
+      const te = p.t_end ?? p.t;
+      const within = t >= p.t && t < te;
+      let live = sfxLive.find(l => l.p === p);
+      if (within && !live) {
+        const a = new Audio('/api/soundboard/' + p.sound_id + '/audio');
+        a.loop = !!p.loop;
+        a.volume = vol;
+        a.play().catch(() => {});
+        sfxLive.push({ p, audio: a });
+      } else if (!within && live) {
+        try { live.audio.pause(); } catch (_) {}
+        sfxLive = sfxLive.filter(l => l !== live);
+      } else if (live) {
+        live.audio.volume = vol;
+      }
+    } else if (t >= p.t && t < p.t + 0.4 && !p._fired) {
+      p._fired = true;
+      const a = new Audio('/api/soundboard/' + p.sound_id + '/audio');
+      a.volume = vol;
+      a.play().catch(() => {});
+      setTimeout(() => { p._fired = false; }, 1200);
+    }
+  }
 }
 
 function initSfxStep() {
@@ -2520,6 +2774,7 @@ function soundName(id) {
 }
 
 function renderSfxList() {
+  renderSfxTrack();   // the draggable timeline mirrors the list
   const ol = $('#sfx-list');
   const count = $('#sfx-count');
   if (count) count.textContent = state.sfx.length;
@@ -2584,6 +2839,10 @@ function wireIll() {
   $('#ill-scrubber').addEventListener('input', (e) => { if (v.duration) v.currentTime = +e.target.value; });
   $('#btn-ill-search').addEventListener('click', doIllSearch);
   $('#ill-query').addEventListener('keydown', (e) => { if (e.key === 'Enter') doIllSearch(); });
+  const up = $('#btn-ill-upload');
+  if (up) up.addEventListener('click', () => $('#ill-file').click());
+  const upf = $('#ill-file');
+  if (upf) upf.addEventListener('change', onIllUpload);
   $('#ill-track').addEventListener('mousedown', onIllTrackDown);
   window.addEventListener('mousemove', onIllDragMove);
   window.addEventListener('mouseup', () => { if (state.illDrag) { state.illDrag = null; renderIllList(); } });
@@ -2635,6 +2894,23 @@ function renderIllCandidates(cands) {
       <img src="${escapeHtml(c.thumb)}" loading="lazy" alt="">
     </button>`).join('');
   box.querySelectorAll('.ill-cand').forEach(b => b.addEventListener('click', () => addCutaway(b.dataset.url, b.dataset.thumb)));
+}
+
+async function onIllUpload() {
+  const file = $('#ill-file').files[0];
+  if (!file) return;
+  $('#ill-file').value = '';
+  setStatus('ill-status', `Uploading ${file.name}…`);
+  try {
+    const r = await fetch('/api/ill-upload?filename=' + encodeURIComponent(file.name),
+      { method: 'POST', body: file });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    const j = await r.json();
+    addCutaway(j.url, j.thumb || j.url);   // drops at the current time like a Pexels pick
+    setStatus('ill-status', `"${file.name}" added as a cutaway at the current time.`, 'ok');
+  } catch (e) {
+    setStatus('ill-status', 'Upload failed: ' + e.message, 'err');
+  }
 }
 
 function addCutaway(url, thumb) {
@@ -2756,8 +3032,92 @@ function renderIllList() {
   }));
 }
 
-// ── illustration preview (composite: video frame + cutaway in its target/fit) ──
+// ── final-composite preview (shared by Sound / Illustration / Trim steps) ──
+// Simulates the rendered 9:16 reel at time t: box1 crop in the top slot, box2
+// in the bottom (per-kf cover/blur_pad fit), single-box full-focus when the
+// other box is gap, black when both gap, plus illustration cutaways. So every
+// step edits against (a preview of) the FINAL video, not the raw source.
 const ILL_PV_W = 180, ILL_PV_H = 320;          // 9:16
+
+function kfFitAtT(kfs, t) {
+  if (!kfs || !kfs.length) return 'cover';
+  let cur = kfs[0];
+  for (const k of kfs) { if (k.t <= t) cur = k; else break; }
+  return cur.fit || 'cover';
+}
+
+// Draw the source-rect `box` of video v into [dx,dy,dw,dh] with cover (crop)
+// or blur_pad (contain + blurred cover behind) fit.
+function drawCropBox(ctx, v, box, dx, dy, dw, dh, fit) {
+  const sx = v.videoWidth / (state.source ? state.source.width : v.videoWidth) || 1;
+  const sy = v.videoHeight / (state.source ? state.source.height : v.videoHeight) || 1;
+  const bx = box.x * sx, by = box.y * sy, bw = box.w * sx, bh = box.h * sy;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(dx, dy, dw, dh); ctx.clip();
+  const coverCrop = () => {
+    const s = Math.max(dw / bw, dh / bh);
+    const vw = dw / s, vh = dh / s;                  // visible source sub-rect
+    const ox = bx + (bw - vw) / 2, oy = by + (bh - vh) / 2;
+    ctx.drawImage(v, ox, oy, vw, vh, dx, dy, dw, dh);
+  };
+  if (fit === 'blur_pad') {
+    ctx.filter = 'blur(8px) brightness(0.85)';
+    coverCrop();
+    ctx.filter = 'none';
+    const s = Math.min(dw / bw, dh / bh);
+    const w = bw * s, h = bh * s;
+    ctx.drawImage(v, bx, by, bw, bh, dx + (dw - w) / 2, dy + (dh - h) / 2, w, h);
+  } else {
+    coverCrop();
+  }
+  ctx.restore();
+}
+
+function drawComposite(ctx, v, t, W, H, opts) {
+  const o = opts || {};
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (!v || !v.videoWidth) return;
+  const has1 = (state.keyframes[1] || []).length > 0;
+  const has2 = (state.keyframes[2] || []).length > 0;
+  if (!has1 && !has2) {
+    coverDraw(ctx, v, 0, 0, W, H);                    // nothing boxed yet → raw
+  } else {
+    const b1 = boxAt(1, t), b2 = boxAt(2, t);
+    const topH = H * 3 / 8;
+    if (b1 && b2) {
+      drawCropBox(ctx, v, b1, 0, 0, W, topH, kfFitAtT(state.keyframes[1], t));
+      drawCropBox(ctx, v, b2, 0, topH, W, H - topH, kfFitAtT(state.keyframes[2], t));
+    } else if (b1 || b2) {
+      const n = b1 ? 1 : 2;                           // single-box full-focus mode
+      drawCropBox(ctx, v, b1 || b2, 0, 0, W, H, kfFitAtT(state.keyframes[n], t));
+    }                                                  // both gap → black
+  }
+  if (o.ills !== false) {
+    for (const cut of (state.ills || [])) {
+      if (t < cut.t_start || t >= cut.t_end) continue;
+      const img = illImgCache[cut.thumb];
+      if (!img || !img.complete || !img.naturalWidth) { preloadIllImg(cut.thumb); continue; }
+      const [x, y, w, h] = illSlotRect2(cut.target || 'full', W, H);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      if ((cut.fit || 'cover') === 'blur') {
+        ctx.filter = 'blur(8px) brightness(0.9)'; coverDraw(ctx, img, x, y, w, h); ctx.filter = 'none';
+        containDraw(ctx, img, x, y, w, h);
+      } else {
+        coverDraw(ctx, img, x, y, w, h);
+      }
+      ctx.restore();
+    }
+  }
+}
+
+function illSlotRect2(target, W, H) {
+  const top = H * 3 / 8;
+  if (target === 'box1') return [0, 0, W, top];
+  if (target === 'box2') return [0, top, W, H - top];
+  return [0, 0, W, H];
+}
+
 const illImgCache = {};
 function preloadIllImg(url) {
   if (!url || illImgCache[url]) return;
@@ -2766,12 +3126,6 @@ function preloadIllImg(url) {
   im.onload = drawIllPreview;
   im.src = url;
   illImgCache[url] = im;
-}
-function illSlotRect(target) {
-  const top = ILL_PV_H * 3 / 8;
-  if (target === 'box1') return [0, 0, ILL_PV_W, top];
-  if (target === 'box2') return [0, top, ILL_PV_W, ILL_PV_H - top];
-  return [0, 0, ILL_PV_W, ILL_PV_H];
 }
 function coverDraw(ctx, img, dx, dy, dw, dh) {
   const iw = img.naturalWidth || img.videoWidth, ih = img.naturalHeight || img.videoHeight;
@@ -2790,27 +3144,34 @@ function containDraw(ctx, img, dx, dy, dw, dh) {
 function drawIllPreview() {
   const c = $('#ill-preview');
   if (!c) return;
-  const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, ILL_PV_W, ILL_PV_H);
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, ILL_PV_W, ILL_PV_H);
   const v = els.illVideo;
-  if (v && v.videoWidth) coverDraw(ctx, v, 0, 0, ILL_PV_W, ILL_PV_H);   // video frame (cover 9:16)
+  drawComposite(c.getContext('2d'), v, v ? (v.currentTime || 0) : 0, ILL_PV_W, ILL_PV_H);
+}
+
+// trim-step preview: the same composite + a CUT tint when the playhead is in a
+// stretch that the keep-windows will drop
+function drawTrimPreview() {
+  const c = $('#trim-preview');
+  if (!c) return;
+  const v = els.trimVideo;
   const t = v ? (v.currentTime || 0) : 0;
-  const active = (state.ills || []).filter(c => t >= c.t_start && t < c.t_end);
-  for (const cut of active) {
-    const img = illImgCache[cut.thumb];
-    if (!img || !img.complete || !img.naturalWidth) { preloadIllImg(cut.thumb); continue; }
-    const [x, y, w, h] = illSlotRect(cut.target || 'full');
-    ctx.save();
-    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-    if ((cut.fit || 'cover') === 'blur') {
-      ctx.filter = 'blur(8px) brightness(0.9)'; coverDraw(ctx, img, x, y, w, h); ctx.filter = 'none';
-      containDraw(ctx, img, x, y, w, h);
-    } else {
-      coverDraw(ctx, img, x, y, w, h);
-    }
-    ctx.restore();
+  const ctx = c.getContext('2d');
+  drawComposite(ctx, v, t, ILL_PV_W, ILL_PV_H);
+  if (state.keep.length && !state.keep.some(w => t >= w.start && t < w.end)) {
+    ctx.fillStyle = 'rgba(180,30,30,.45)';
+    ctx.fillRect(0, 0, ILL_PV_W, ILL_PV_H);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 26px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('CUT', ILL_PV_W / 2, ILL_PV_H / 2);
   }
+}
+
+function drawSfxPreview() {
+  const c = $('#sfx-preview');
+  if (!c) return;
+  const v = els.sfxVideo;
+  drawComposite(c.getContext('2d'), v, v ? (v.currentTime || 0) : 0, ILL_PV_W, ILL_PV_H);
 }
 
 // ───────────────────────── trim (multi-segment keep) ─────────────────────────
@@ -2832,7 +3193,10 @@ function wireTrim() {
     const t = $('#trim-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
     const scr = $('#trim-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
     updateTrimCursor();
+    drawTrimPreview();
   });
+  v.addEventListener('loadeddata', drawTrimPreview);
+  v.addEventListener('seeked', drawTrimPreview);
   v.addEventListener('play', () => { const b = $('#trim-play'); if (b) b.textContent = '❚❚'; });
   v.addEventListener('pause', () => { const b = $('#trim-play'); if (b) b.textContent = '▶'; });
   $('#trim-play').addEventListener('click', () => { if (v.paused) v.play(); else v.pause(); });
@@ -2840,6 +3204,8 @@ function wireTrim() {
   $('#btn-trim-a').addEventListener('click', setKeepA);
   $('#btn-trim-b').addEventListener('click', setKeepB);
   $('#btn-trim-here').addEventListener('click', addKeepHere);
+  const ai = $('#btn-trim-ai');
+  if (ai) ai.addEventListener('click', autoTrimQuiet);
   $('#btn-trim-clear').addEventListener('click', () => { state.keep = []; state.keepA = null; renderTrimTrack(); renderTrimList(); setStatus('trim-status', 'Cleared — keeps the whole clip.', 'ok'); });
   $('#trim-track').addEventListener('mousedown', onTrimTrackDown);
   window.addEventListener('mousemove', onTrimDragMove);
@@ -2894,6 +3260,50 @@ function addKeepHere() {
 
 function keptTotal() {
   return state.keep.reduce((s, w) => s + (w.end - w.start), 0);
+}
+
+// AI auto-trim: detect quiet/dead-air stretches (backend ffmpeg silencedetect)
+// and keep only the talking parts. Every produced window is a normal keep bar —
+// drag, resize, or delete it like a manual one.
+async function autoTrimQuiet() {
+  if (!state.jobId) { setStatus('trim-status', 'Load a clip first.', 'err'); return; }
+  const btn = $('#btn-trim-ai');
+  if (btn) btn.disabled = true;
+  setStatus('trim-status', '🤖 Listening for quiet stretches…');
+  try {
+    const res = await apiPost('/api/detect-silence', { job_id: state.jobId, noise_db: -35, min_dur: 1.0 });
+    const dur = res.duration || trimDur() || 0;
+    const sil = (res.silences || []).filter(s => s.end - s.start >= 1.0);
+    if (!sil.length) {
+      setStatus('trim-status', 'No long quiet stretches found — nothing to cut.', 'ok');
+      return;
+    }
+    // keep = complement of the silences, padded a touch so speech onsets survive
+    const PAD = 0.15, MIN_KEEP = 0.4;
+    const keeps = [];
+    let cur = 0;
+    for (const s of sil) {
+      const a = cur, b = Math.min(s.start + PAD, dur);
+      if (b - a >= MIN_KEEP) keeps.push({ start: +a.toFixed(2), end: +b.toFixed(2) });
+      cur = Math.max(cur, s.end - PAD);
+    }
+    if (dur - cur >= MIN_KEEP) keeps.push({ start: +cur.toFixed(2), end: +dur.toFixed(2) });
+    if (!keeps.length) {
+      setStatus('trim-status', 'The whole clip is quiet?! Leaving it untrimmed.', 'err');
+      return;
+    }
+    state.keep = keeps;
+    state.keepA = null;
+    renderTrimTrack(); renderTrimList(); drawTrimPreview();
+    const cut = dur - keptTotal();
+    setStatus('trim-status',
+      `🤖 ${sil.length} quiet stretch(es) cut — saves ${cut.toFixed(1)}s (kept ${keptTotal().toFixed(1)}s of ${dur.toFixed(1)}s). Adjust or delete any bar.`,
+      'ok');
+  } catch (e) {
+    setStatus('trim-status', 'Auto-trim failed: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function renderTrimTrack() {

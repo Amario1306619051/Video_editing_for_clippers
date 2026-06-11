@@ -353,6 +353,15 @@
             <label><span>Outline</span><input type="color" id="thumb-stroke" value="#000000"></label>
             <label class="thumb-check"><input type="checkbox" id="thumb-upper" checked> UPPERCASE</label>
             <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
+            <label><span>Effect</span>
+              <select id="thumb-effect" title="texture/finish applied over the whole thumbnail">
+                <option value="none">None</option>
+                <option value="crumple">Crumpled paper</option>
+                <option value="grain">Film grain</option>
+                <option value="vignette">Vignette</option>
+                <option value="crumple+vignette">Crumple + vignette</option>
+              </select>
+            </label>
           </div>
         </div>
 
@@ -373,6 +382,12 @@
             </label>
             <label><span>Min duration (s)</span><input type="number" id="th-intro-dur" value="4" min="1" max="15" step="0.5"></label>
             <label class="intro-check"><input type="checkbox" id="th-intro-voice" checked> 🔊 Voiceover reads headline</label>
+            <label><span>Voice</span>
+              <select id="th-intro-engine" title="Piper = offline · Google = the Google Translate voice (needs internet)">
+                <option value="gtts">Google (online)</option>
+                <option value="piper">Piper (offline)</option>
+              </select>
+            </label>
           </div>
           <div class="intro-prev-row">
             <button class="ghost small" id="btn-th-voice">🔊 Preview voice</button>
@@ -400,13 +415,24 @@
     <div class="sfx-layout">
       <div class="sfx-left">
         <div class="sfx-stage">
-          <video id="sfx-video" playsinline></video>
+          <div class="ill-stage-row">
+            <video id="sfx-video" playsinline style="flex:1;min-width:0"></video>
+            <div class="ill-preview-wrap">
+              <div class="ill-preview-label">Final preview</div>
+              <canvas id="sfx-preview" width="180" height="320"></canvas>
+            </div>
+          </div>
           <div class="sfx-scrub">
             <button class="ctrl-btn" id="sfx-play" title="Play/Pause">▶</button>
             <span class="time-cur" id="sfx-time">0:00.0</span>
             <input type="range" id="sfx-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
             <span class="time-dur" id="sfx-dur">0:00.0</span>
           </div>
+        </div>
+
+        <div class="sfx-track-wrap">
+          <div class="sfx-sub-head">Timeline — drag a bar to move it, edges to change start/end · pins = one-shots</div>
+          <div class="sfx-bars" id="sfx-track" title="drag to move · left/right edge to resize · double-click to remove"></div>
         </div>
 
         <div class="sfx-placements">
@@ -491,7 +517,11 @@
             <input type="text" id="ill-query" placeholder="search Pexels — e.g. money, city night, sad cat">
             <button class="primary" id="btn-ill-search">Search</button>
           </div>
-          <label class="ill-defdur">default duration <input type="number" id="ill-defdur" value="3" min="0.5" max="30" step="0.5"> s</label>
+          <div class="ill-search-row">
+            <button class="ghost small" id="btn-ill-upload" title="use your own image as a cutaway">📁 Import image</button>
+            <input type="file" id="ill-file" accept="image/*" hidden>
+            <label class="ill-defdur">default duration <input type="number" id="ill-defdur" value="3" min="0.5" max="30" step="0.5"> s</label>
+          </div>
           <span class="status" id="ill-status"></span>
         </div>
         <div class="ill-candidates" id="ill-candidates"></div>
@@ -513,7 +543,13 @@
 
     <div class="trim-layout">
       <div class="trim-stage">
-        <video id="trim-video" playsinline></video>
+        <div class="ill-stage-row">
+          <video id="trim-video" playsinline style="flex:1;min-width:0"></video>
+          <div class="ill-preview-wrap">
+            <div class="ill-preview-label">Final preview</div>
+            <canvas id="trim-preview" width="180" height="320"></canvas>
+          </div>
+        </div>
         <div class="trim-scrub">
           <button class="ctrl-btn" id="trim-play" title="Play/Pause">▶</button>
           <span class="time-cur" id="trim-time">0:00.0</span>
@@ -524,6 +560,7 @@
           <button class="ghost" id="btn-trim-a">◖ Set A (in)</button>
           <button class="ghost" id="btn-trim-b">Set B (out) ◗</button>
           <button class="primary" id="btn-trim-here">+ keep ~3s here</button>
+          <button class="ghost" id="btn-trim-ai" title="AI: detect quiet/dead-air stretches and keep only the talking parts — every window stays editable/deletable">🤖 Auto-cut quiet parts</button>
           <button class="ghost small" id="btn-trim-clear" title="remove all windows">clear</button>
           <span class="status" id="trim-status"></span>
         </div>

@@ -27,7 +27,7 @@ from models import (
     AutoBoxRequest, AutoBoxResponse,
     ThumbnailTextRequest, ThumbnailTextResponse,
     QueueImportRequest, QueueJobPatch,
-    SoundPatch,
+    SoundPatch, DetectSilenceRequest,
     SearchRequest, SearchResponse,
     TtsRequest,
     Word,
@@ -268,17 +268,17 @@ def api_search(req: SearchRequest):
 
 @app.post("/api/tts-preview")
 def api_tts_preview(req: TtsRequest):
-    """Synthesize text → wav with Piper, for previewing the intro voiceover.
-    Per-request unique file (concurrent previews must not clobber each other),
-    deleted right away — the small wav is returned as the response body."""
+    """Synthesize text → wav (Google or Piper engine), for previewing the intro
+    voiceover. Per-request unique file (concurrent previews must not clobber
+    each other), deleted right away — the small wav is the response body."""
     if not tts.enabled():
-        raise HTTPException(status_code=400, detail="no Piper voice installed (clipper/voices/*.onnx)")
+        raise HTTPException(status_code=400, detail="no TTS engine available (install gTTS or drop a Piper voice into clipper/voices/)")
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty text")
     out = TEMP_DIR / f"tts_preview_{uuid.uuid4().hex}.wav"
     try:
-        tts.synthesize(text, out)
+        tts.synthesize(text, out, engine=req.engine)
         data = out.read_bytes()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -300,6 +300,64 @@ async def api_intro_image(request: Request, job_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     (TEMP_DIR / f"{job_id}_intro.png").write_bytes(data)
     return {"ok": True}
+
+
+@app.post("/api/ill-upload")
+async def api_ill_upload(request: Request, filename: str = "image"):
+    """Upload the user's OWN image (raw body, like the soundboard import) to use
+    as an illustration cutaway. Saved into temp/ deduped by content hash; the
+    returned /temp/ URL plugs straight into the normal cutaway flow (the
+    renderer's download_pick recognizes /temp/ URLs as already-local)."""
+    import hashlib
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty image")
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="image too large (max 25MB)")
+    ext = Path(filename).suffix.lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"):
+        ext = ".jpg"
+    name = f"ill_up_{hashlib.sha1(data).hexdigest()[:12]}{ext}"
+    (TEMP_DIR / name).write_bytes(data)
+    return {"url": f"/temp/{name}", "thumb": f"/temp/{name}"}
+
+
+@app.post("/api/detect-silence")
+def api_detect_silence(req: DetectSilenceRequest):
+    """AI trim helper: find quiet/dead-air stretches (ffmpeg silencedetect) so
+    the Trim step can auto-keep only the talking parts. Returns the silent
+    ranges; the frontend builds editable keep-windows from their complement."""
+    try:
+        src = downloader.get_source_path(req.job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    import re as _re
+    import subprocess as _sp
+    noise = int(req.noise_db) if req.noise_db else -35
+    min_d = max(0.3, float(req.min_dur or 1.0))
+    proc = _sp.run(
+        ["ffmpeg", "-hide_banner", "-i", str(src),
+         "-af", f"silencedetect=noise={noise}dB:d={min_d}", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=300,
+    )
+    silences, start = [], None
+    for line in (proc.stderr or "").splitlines():
+        m = _re.search(r"silence_start:\s*([0-9.]+)", line)
+        if m:
+            start = float(m.group(1))
+            continue
+        m = _re.search(r"silence_end:\s*([0-9.]+)", line)
+        if m and start is not None:
+            silences.append({"start": round(start, 2), "end": round(float(m.group(1)), 2)})
+            start = None
+    dur = 0.0
+    try:
+        dur = renderer._probe_duration(src)
+    except Exception:  # noqa: BLE001
+        pass
+    if start is not None:                       # silence ran to the end of file
+        silences.append({"start": round(start, 2), "end": round(dur or start, 2)})
+    return {"silences": silences, "duration": dur}
 
 
 @app.get("/api/img")
