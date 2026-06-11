@@ -153,10 +153,10 @@
           </div>
           <div class="autobox-row ab-opts">
             <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
-            <select id="ab-density" title="sampling density (more = smoother but slower)">
-              <option value="3">Fast · 3s</option>
-              <option value="1.5" selected>Balanced · 1.5s</option>
-              <option value="0.8">Smooth · 0.8s</option>
+            <select id="ab-density" title="switch/motion timing precision — sampling is adaptive (dense only where the box actually changes), so Precise stays fast on static panels">
+              <option value="1">Fast · 1s</option>
+              <option value="0.8">Balanced · 0.8s</option>
+              <option value="0.2" selected>Precise · 0.2s</option>
             </select>
             <span class="ab-range-lbl">range: <b id="ab-start-lbl">0.0s</b> → <b id="ab-end-lbl">end</b></span>
           </div>

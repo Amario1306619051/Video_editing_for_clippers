@@ -1313,7 +1313,7 @@ async function doAutoBox(n) {
   const dur = state.source.duration;
   const t0 = Math.max(0, state.autoRange.start || 0);
   const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
-  const step = +els.abDensity.value || 1.5;
+  const step = +els.abDensity.value || 0.2;
   const btn = document.querySelector(`.ab-gen[data-box="${n}"]`);
   if (btn) btn.disabled = true;
   setStatus('ab-status',

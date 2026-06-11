@@ -189,14 +189,16 @@ class CleanupRequest(BaseModel):
 
 class AutoBoxRequest(BaseModel):
     """Ask the vision model to draw a box track for `prompt` over [t_start, t_end].
-    `box` (1/2) is informational (which slot the user is targeting). The result is
-    a list of keyframes the user can then edit in the Position step."""
+    `box` (1/2) is which slot the user is targeting — it also tells fullscreen-
+    webcam layout segments what the box IS (1 = streamer → whole frame, 2 =
+    content → gap). The result is a list of keyframes the user can then edit in
+    the Position step."""
     job_id: str
     prompt: str
     t_start: float = 0.0
     t_end: Optional[float] = None
     box: int = 1
-    step_seconds: float = 1.5   # sample one frame every N seconds across the range
+    step_seconds: float = 0.2   # timing PRECISION — sampling is adaptive (~1s grid, denser only at changes)
     padding: float = 0.05       # expand each detected box by this fraction per side
     smooth: bool = True         # damp frame-to-frame jitter
     lock_size: bool = True      # lock one box size across the range (pan only) — stable framing

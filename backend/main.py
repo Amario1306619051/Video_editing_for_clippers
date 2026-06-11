@@ -145,6 +145,9 @@ def api_autobox(req: AutoBoxRequest):
             src, req.prompt, req.t_start, req.t_end,
             step_seconds=req.step_seconds, padding=req.padding, smooth=req.smooth,
             lock_size=req.lock_size,
+            # box 1 = streamer, box 2 = content — the placeholder convention;
+            # only consulted in fullscreen-webcam layout segments
+            role={1: "streamer", 2: "content"}.get(req.box),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
