@@ -2444,13 +2444,18 @@ function renderQueueList(jobs) {
       ? `<a class="q-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>`
       : '';
     const retry = j.status === 'error' ? `<button class="q-retry" data-key="${j.key}" title="retry this job">↻</button>` : '';
+    // A job waiting in the boxing queue can be pulled out: ready NOW, no boxes,
+    // the user draws them manually instead of waiting for the AI stage.
+    const skip = j.status === 'downloaded'
+      ? `<button class="q-skip" data-key="${j.key}" title="Skip AI boxing — open this clip now and draw the boxes manually">✎ manual</button>`
+      : '';
     return `<li class="queue-item${active}" data-status="${j.status}">
       <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${escapeHtml(j.message || '')}">
         <span class="q-id">${escapeHtml(j.id)}</span>
         <span class="q-title">${escapeHtml(j.title || '')}</span>
         <span class="q-sub">${statusBadge(j.status)}${kf}</span>
       </button>
-      ${dl}${renderBtn}${retry}
+      ${dl}${renderBtn}${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
     </li>`;
   }).join('');
@@ -2458,6 +2463,18 @@ function renderQueueList(jobs) {
   ul.querySelectorAll('.q-render').forEach(b => b.addEventListener('click', () => renderQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-del').forEach(b => b.addEventListener('click', () => deleteQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-retry').forEach(b => b.addEventListener('click', () => retryQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-skip').forEach(b => b.addEventListener('click', () => skipBoxQueueJob(b.dataset.key)));
+}
+
+async function skipBoxQueueJob(key) {
+  try {
+    await apiPost(`/api/queue/${key}/skip-box`, {});
+    await openQueueJob(key);   // ready now — open it straight into the editor
+    setStatus('queue-status', 'Boxing skipped — draw the boxes manually (pick a Box pill, drag on the video).', 'ok');
+  } catch (e) {
+    setStatus('queue-status', 'Skip failed: ' + e.message, 'err');
+    refreshQueue();
+  }
 }
 
 async function openQueueJob(key) {

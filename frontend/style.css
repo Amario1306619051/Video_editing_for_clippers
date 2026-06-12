@@ -1013,6 +1013,12 @@ button.small { padding: 4px 9px; font-size: 12px; }
   display: flex; align-items: center; text-decoration: none;
 }
 .q-render:hover, .q-dl:hover { color: var(--accent); background: #ffffff0a; border-color: transparent; }
+.q-skip {
+  flex: 0 0 auto; border: none; background: transparent; color: var(--text-mute);
+  padding: 0 7px; font-size: 10px; line-height: 1; white-space: nowrap;
+  display: flex; align-items: center;
+}
+.q-skip:hover { color: var(--accent); background: #ffffff0a; }
 
 /* ───────────────────────── sound effects step ───────────────────────── */
 .sfx-layout { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 24px; align-items: start; }
