@@ -960,6 +960,21 @@ kbd {
 .queue-title { font-family: var(--display); font-weight: 700; font-size: 14px; flex: 1; }
 button.small { padding: 4px 9px; font-size: 12px; }
 .queue-meta { font-size: 11px; color: var(--text-dim); }
+.queue-progress { margin: 8px 0 4px; }
+.queue-progress.hidden { display: none; }
+.queue-progress-bar {
+  height: 6px; background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: 99px; overflow: hidden;
+}
+.queue-progress-bar span {
+  display: block; height: 100%; width: 0;
+  background: var(--accent); border-radius: 99px;
+  transition: width .4s ease;
+}
+.queue-progress-txt {
+  font-size: 10px; color: var(--text-dim); margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
 .queue-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .queue-item {
   display: flex; align-items: stretch; gap: 4px;

@@ -2425,14 +2425,31 @@ function renderQueueList(jobs) {
   const ul = $('#queue-list');
   const meta = $('#queue-meta');
   if (!ul) return;
+  const prog = $('#queue-progress');
   if (!jobs.length) {
     ul.innerHTML = '';
     if (meta) meta.textContent = 'No jobs queued.';
+    if (prog) prog.classList.add('hidden');
     return;
   }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  // progress bar = clips that made it through boxing (ready/done/error) of all
+  if (prog) {
+    prog.classList.remove('hidden');
+    const settled = (c.ready || 0) + (c.done || 0) + (c.error || 0);
+    const pct = Math.round((settled / jobs.length) * 100);
+    const fill = $('#queue-progress-fill');
+    const txt = $('#queue-progress-txt');
+    if (fill) fill.style.width = pct + '%';
+    if (txt) {
+      const phase = c.downloading ? 'downloading' : (c.predicting ? 'boxing'
+        : (c.rendering ? 'rendering' : null));
+      txt.textContent = `${settled}/${jobs.length} boxed · ${pct}%`
+        + (phase ? ` · ${phase}…` : '');
+    }
+  }
   ul.innerHTML = jobs.map(j => {
     const active = j.key === state.activeQueueKey ? ' active' : '';
     const canOpen = j.status === 'ready' || j.status === 'done';
