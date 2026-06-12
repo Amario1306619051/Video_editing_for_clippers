@@ -579,6 +579,14 @@ def _predict_boxes(job: dict) -> None:
                     # both boxes full-frame at once = the same shot stacked
                     # twice → the streamer box owns fullscreen, box2 gaps
                     box2 = autobox.dedupe_fullframe_pair(box1, box2, w_, h_)
+        # drop sub-second box flickers (a transient zoom/funny-effect frame that
+        # resizes the box then reverts) — applies to whichever boxes exist
+        w_, h_ = job.get("width") or 0, job.get("height") or 0
+        if w_ and h_:
+            if box1:
+                box1 = autobox.debounce_track(box1, w=w_, h=h_)
+            if box2:
+                box2 = autobox.debounce_track(box2, w=w_, h=h_)
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,
