@@ -393,6 +393,20 @@ def skip_boxing(key: str) -> Optional[dict]:
     return _find(key)
 
 
+def stop_boxing() -> int:
+    """Pull EVERY job waiting in the boxing queue (`downloaded`) out to `ready`
+    with no boxes — stops the boxing run so the user can focus elsewhere; each
+    becomes a draw-manually clip. The 1-2 jobs already in-flight finish (a
+    vision call can't be interrupted mid-request) but no new ones start.
+    Returns how many were pulled."""
+    with _lock, _db() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status='ready', "
+            "message='boxing stopped — draw the boxes manually' "
+            "WHERE status='downloaded'")
+        return cur.rowcount
+
+
 def queue_render(key: str) -> Optional[dict]:
     """Mark a downloaded job for the (background) render phase. Boxes used are
     whatever is currently saved (the frontend auto-saves edits before calling)."""
@@ -438,11 +452,11 @@ def delete_job(key: str, cleanup: bool = True) -> bool:
 
 # ───────────────────────── background worker ─────────────────────────
 _OBSERVE_QUESTION = (
-    "Look at this video frame from a reaction stream. In ONE short sentence, "
-    "describe the live streamer in the webcam panel (gender, skin tone, clothing, "
-    "accessories). Then in ONE short sentence, describe what kind of content the "
-    "other panel shows. Be factual and concise. Do NOT mention left/right/top/"
-    "bottom positions. Answer with the two sentences only."
+    "Look at this video frame. In ONE short sentence, describe the main person on "
+    "camera (gender, skin tone, clothing, accessories). Then in ONE short "
+    "sentence, describe what the other on-screen content area shows, if any. Be "
+    "factual and concise. Do NOT mention left/right/top/bottom positions. Answer "
+    "with the two sentences only."
 )
 
 

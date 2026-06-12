@@ -2398,6 +2398,8 @@ function wireQueue() {
   });
   const all = $('#btn-queue-render-all');
   if (all) all.addEventListener('click', renderAllReady);
+  const stop = $('#btn-queue-stop-box');
+  if (stop) stop.addEventListener('click', stopBoxing);
   refreshQueue();
   setInterval(refreshQueue, 3000);   // live status while the worker churns
   setInterval(autosaveQueue, 5000);  // persist box edits on the active job
@@ -2410,6 +2412,17 @@ async function refreshQueue() {
     const data = await r.json();
     renderQueueList(data.jobs || []);
   } catch (e) { /* sidebar is best-effort */ }
+}
+
+async function stopBoxing() {
+  if (!confirm('Stop the AI boxing run? Clips still waiting become draw-manually (the 1-2 already boxing will finish).')) return;
+  try {
+    const r = await apiPost('/api/queue/stop-boxing', {});
+    setStatus('queue-status', `Boxing stopped — ${r.stopped} clip(s) set to draw-manually.`, 'ok');
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Stop failed: ' + e.message, 'err');
+  }
 }
 
 function statusBadge(s) {
@@ -2435,6 +2448,12 @@ function renderQueueList(jobs) {
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  // Stop-boxing button visible only while clips are downloading/waiting/boxing
+  const stopBtn = $('#btn-queue-stop-box');
+  if (stopBtn) {
+    const boxingActive = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0);
+    stopBtn.classList.toggle('hidden', boxingActive === 0);
+  }
   // progress bar = clips that made it through boxing (ready/done/error) of all
   if (prog) {
     prog.classList.remove('hidden');

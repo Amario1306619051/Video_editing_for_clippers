@@ -244,6 +244,13 @@ def api_queue_skip_box(key: str):
     return {"ok": True}
 
 
+@app.post("/api/queue/stop-boxing")
+def api_queue_stop_boxing():
+    """Stop the whole boxing run: every job still waiting to be boxed goes to
+    ready (draw-manually). In-flight jobs finish; no new ones start."""
+    return {"stopped": batch_queue.stop_boxing()}
+
+
 @app.post("/api/queue/render-ready")
 def api_queue_render_ready():
     """Queue every edited-and-ready job for the background transcribe + render."""
