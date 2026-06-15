@@ -17,3 +17,13 @@ openai>=1.0            # client for the vision-LM endpoint (AI auto-box); option
 requests>=2.0
 piper-tts  # local TTS for the intro-card voiceover (download a voice into clipper/voices/)
 gTTS       # Google Translate voice for the intro voiceover (online engine)
+# Optional speaker diarization for the windowed shot-director (Phase 3). pyannote 4.x
+# works with torch 2.11 (it needs torch>=2.8); torchcodec supplies audio I/O since the
+# 2.11 torchaudio build dropped load/info. torchaudio MUST match the live torch
+# (2.11.0+cu128) — pyannote imports it. Needs a HuggingFace token + gated-model
+# acceptance (see diarize.py / .env.example). The feature is lazy + optional: omit
+# these on hosts without a token and diarization simply stays off.
+pyannote.audio>=4,<5  # diarization (WHO is talking) — optional
+torchcodec            # audio backend pyannote/torchaudio 2.11 need
+torchaudio==2.11.0+cu128  # MUST match torch above (cu128)
+click>=8.0,<8.2       # keep gTTS happy (pyannote/typer would otherwise pull click 8.4+)

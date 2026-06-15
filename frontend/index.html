@@ -24,6 +24,10 @@
     <button class="step" data-step="4"><span>06</span> Thumbnail</button>
     <button class="step" data-step="3"><span>07</span> Render</button>
   </nav>
+  <div class="hist-controls">
+    <button id="btn-undo" class="hist-btn" title="Undo (Ctrl+Z)" disabled>↶</button>
+    <button id="btn-redo" class="hist-btn" title="Redo (Ctrl+Shift+Z / Ctrl+Y)" disabled>↷</button>
+  </div>
 </header>
 
 <div class="layout">
@@ -34,6 +38,13 @@
       <span class="queue-title">⚙ Queue</span>
       <button id="btn-queue-import" class="ghost small" title="Load a JSON of clips — the model downloads + auto-boxes them in the background">+ JSON</button>
       <input type="file" id="queue-file" accept=".json,application/json,.txt" hidden>
+    </div>
+    <div class="room-bar">
+      <select id="room-select" title="Filter jobs by room; imports go into the selected room">
+        <option value="">All rooms</option>
+      </select>
+      <button id="btn-room-new" class="ghost small" title="Create a new room (streamer / project group)">+ Room</button>
+      <button id="btn-room-del" class="ghost small" title="Delete the selected room AND all its clips + videos">× Room</button>
     </div>
     <div class="queue-meta" id="queue-meta">No jobs queued.</div>
     <div class="queue-progress hidden" id="queue-progress">
@@ -126,6 +137,17 @@
           <div class="timeline-cursor" id="timeline-cursor"></div>
         </div>
 
+        <div class="cut-lanes" id="cut-lanes">
+          <div class="cut-lane" data-box="1">
+            <span class="cut-lane-lbl">Box 1</span>
+            <div class="cut-lane-track" id="cuts-1"></div>
+          </div>
+          <div class="cut-lane" data-box="2">
+            <span class="cut-lane-lbl">Box 2</span>
+            <div class="cut-lane-track" id="cuts-2"></div>
+          </div>
+        </div>
+
         <div class="box-controls">
           <div class="box-pill" id="pill-1">
             <span class="dot dot-1"></span>
@@ -139,6 +161,12 @@
             <span class="kf-count" id="kf-count-2">0 kf</span>
             <button data-clear="2" title="clear all keyframes">×</button>
           </div>
+        </div>
+
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Empty a box over a range (cut → black):</span>
+          <button class="cut-btn" id="btn-cut-1">Delete Box 1 here</button>
+          <button class="cut-btn" id="btn-cut-2">Delete Box 2 here</button>
         </div>
 
         <div class="autobox">
@@ -162,6 +190,8 @@
           </div>
           <div class="autobox-row ab-opts">
             <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
+            <label class="ab-check" title="Shot-director: shows the model a window of frames + the transcript so it decides layout, who is box1, and pans moving subjects — better on podcasts / reactions (slower: runs Whisper)"><input type="checkbox" id="ab-director"> Director</label>
+            <label class="ab-check" title="Speaker diarization (needs pyannote + HF token): adds a who-is-talking hint to the director"><input type="checkbox" id="ab-diarize"> Diarize</label>
             <select id="ab-density" title="switch/motion timing precision — sampling is adaptive (dense only where the box actually changes), so Precise stays fast on static panels">
               <option value="1">Fast · 1s</option>
               <option value="0.8">Balanced · 0.8s</option>

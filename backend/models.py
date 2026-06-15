@@ -21,6 +21,19 @@ class Keyframe(BaseModel):
     in the middle (click × on the bbox overlay → insert gap kf at currentTime)
     while preserving earlier keyframes. xywh are kept (usually copied from the
     previous kf) but unused during render.
+
+    `dynamic=True` (always implies gap=True) marks a stretch the auto-box judged
+    too unstable to box — left empty on purpose and flagged in the UI so the user
+    draws it by hand. To the renderer it's just a gap (black); the flag is only a
+    label so it shows distinctly from a normal absence gap. (Auto-box no longer
+    EMITS dynamic gaps — a moving subject now pans instead — but the field stays
+    for back-compat with jobs saved before that change.)
+
+    `moving=True` (implies gap=False, dynamic=False) marks a REAL keyframe that is
+    part of a panning track for a moving subject: the box SIZE is locked and the
+    CENTER follows the subject (interp='linear'). Unlike dynamic it renders a box,
+    not black. The flag keeps debounce / the hold-override / the split-geometry
+    snaps from flattening the pan, and drives a 'TRACKED' UI chip.
     """
     t: float = 0.0
     x: float
@@ -30,6 +43,8 @@ class Keyframe(BaseModel):
     interp: str = "hold"
     fit: str = "cover"
     gap: bool = False
+    dynamic: bool = False
+    moving: bool = False
 
 
 class Word(BaseModel):
@@ -213,6 +228,8 @@ class AutoBoxRequest(BaseModel):
     padding: float = 0.05       # expand each detected box by this fraction per side
     smooth: bool = True         # damp frame-to-frame jitter
     lock_size: bool = True      # lock one box size across the range (pan only) — stable framing
+    director: bool = False      # windowed shot-director pre-pass (frames+transcript → richer segments+pan)
+    diarization: bool = False   # add the dominant-speaker hint (needs pyannote + HF token)
 
 
 class AutoBoxResponse(BaseModel):
@@ -220,6 +237,7 @@ class AutoBoxResponse(BaseModel):
     sampled: int = 0            # frames the vision model looked at
     detected: int = 0           # frames where the subject was found
     message: str = ""
+    director_note: str = ""     # the director's segment timeline (when director=True)
 
 
 class ThumbnailTextRequest(BaseModel):
@@ -238,8 +256,14 @@ class ThumbnailTextResponse(BaseModel):
 
 class QueueImportRequest(BaseModel):
     """Raw text of the uploaded JSON file. Parsed server-side (tolerant of the
-    Python-dict single-quote style the user pastes)."""
+    Python-dict single-quote style the user pastes). `room_id` = the room the new
+    jobs join (None = unassigned)."""
     content: str
+    room_id: Optional[int] = None
+
+
+class RoomCreate(BaseModel):
+    name: str
 
 
 class QueueJobPatch(BaseModel):

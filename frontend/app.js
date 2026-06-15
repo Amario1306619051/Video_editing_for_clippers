@@ -40,6 +40,7 @@ const state = {
   queueSig: null,                         // signature of last auto-saved queue state
   autoObs: '',                            // model's mid-clip observation (prepended to autobox prompts)
   sounds: [],                             // soundboard library (from /api/soundboard)
+  rooms: [],                              // queue rooms [{id,name,jobs}]
   sfx: [],                                // SFX placements for this clip (sent at render)
   sfxPreview: null,                       // currently-playing preview Audio
   ills: [],                               // full-frame illustration cutaways {url,thumb,t_start,t_end}
@@ -48,6 +49,7 @@ const state = {
   keepA: null,                            // pending in-point while marking A→B
   keepDrag: null,                         // drag state for a keep block
   sfxDrag: null,                          // drag state for a sound bar/pin
+  cutDrag: null,                          // drag state for a per-box cut bar (Position step)
 };
 
 // Fit mode is per-keyframe — each kf carries `fit: 'cover'|'blur_pad'` and
@@ -69,6 +71,8 @@ document.addEventListener('DOMContentLoaded', () => {
   els.capSize = $('#cap-size');
   els.dots1 = $('#dots-1');
   els.dots2 = $('#dots-2');
+  els.cuts1 = $('#cuts-1');
+  els.cuts2 = $('#cuts-2');
   els.timelineCursor = $('#timeline-cursor');
   els.curTime = $('#cur-time');
   els.kfCount1 = $('#kf-count-1');
@@ -141,6 +145,36 @@ document.addEventListener('DOMContentLoaded', () => {
       redrawOverlay();
       redrawPreviews();
     });
+  });
+
+  // Per-box cut bars: "Delete Box N here" inserts an empty (gap) range at the
+  // playhead; the bars in the cut lanes are then draggable/resizable/removable.
+  $('#btn-cut-1').addEventListener('click', () => addBoxCut(1));
+  $('#btn-cut-2').addEventListener('click', () => addBoxCut(2));
+  els.cuts1.addEventListener('mousedown', onCutBarDown);
+  els.cuts2.addEventListener('mousedown', onCutBarDown);
+  els.cuts1.addEventListener('dblclick', onCutBarDblClick);
+  els.cuts2.addEventListener('dblclick', onCutBarDblClick);
+  window.addEventListener('mousemove', onCutDragMove);
+  window.addEventListener('mouseup', () => {
+    if (state.cutDrag) { state.cutDrag = null; renderTimeline(); redrawOverlay(); redrawPreviews(); }
+  });
+
+  // Global undo/redo
+  const undoBtn = document.getElementById('btn-undo');
+  const redoBtn = document.getElementById('btn-redo');
+  if (undoBtn) undoBtn.addEventListener('click', histUndo);
+  if (redoBtn) redoBtn.addEventListener('click', histRedo);
+  window.addEventListener('mouseup', () => setTimeout(histCapture, 0));   // capture after click handlers settle
+  window.addEventListener('keyup', () => setTimeout(histCapture, 0));
+  setInterval(histCapture, 1200);                                        // backstop for async edits
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
+    const k = e.key.toLowerCase();
+    if (k === 'z' && !e.shiftKey) { e.preventDefault(); histUndo(); }
+    else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); histRedo(); }
   });
 
   document.addEventListener('keydown', (e) => {
@@ -238,6 +272,11 @@ async function initCapabilities() {
       const pv = $('#btn-th-voice'); if (pv) pv.disabled = true;
       thumb.intro.voice = false;   // programmatic .checked fires no 'change' — sync the state too
       updateRenderIntroNote();
+    }
+    if (!caps.diarize) {
+      const d = $('#ab-diarize');
+      if (d) { d.checked = false; d.disabled = true;
+               d.closest('label').title = 'Diarization off — no pyannote/HF token. The director still decides box1 visually.'; }
     }
   } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
 }
@@ -678,10 +717,246 @@ function renderTimeline() {
   if (!state.source) return;
   renderTrack(els.dots1, 1);
   renderTrack(els.dots2, 2);
+  renderCutLanes();
   els.kfCount1.textContent = state.keyframes[1].length + ' kf';
   els.kfCount2.textContent = state.keyframes[2].length + ' kf';
   updateTimelineCursor();
   renderKfList();
+}
+
+// ───────────────────────── undo / redo (global editing history) ─────────────
+// Snapshots the serializable editing slices and restores them on Ctrl+Z / Ctrl+Y
+// (+ ↶ ↷ buttons). Capture is debounced off mouseup/keyup (one entry per
+// drag/click) with a periodic backstop. Text fields keep the browser's NATIVE
+// undo — we never intercept Ctrl+Z while a field is focused. Illustration cutaways
+// are NOT tracked (they carry loaded <img> objects).
+const hist = { undo: [], redo: [], baseline: null, restoring: false };
+const HIST_MAX = 80;
+
+// Tracks the timeline/bar editing (boxes, cuts, trim windows, SFX placements) —
+// the things you drag/draw. Render-range + caption live in form fields with native
+// undo, so they're left out (restoring them wouldn't sync their inputs).
+function histSig() {
+  return JSON.stringify({
+    k1: state.keyframes[1], k2: state.keyframes[2],
+    keep: state.keep, sfx: state.sfx,
+  });
+}
+
+function histReset() {
+  hist.undo = []; hist.redo = [];
+  hist.baseline = state.source ? histSig() : null;
+  updateUndoButtons();
+}
+
+function histCapture() {
+  if (hist.restoring || !state.source) return;
+  const s = histSig();
+  if (s === hist.baseline) return;
+  if (hist.baseline !== null) {
+    hist.undo.push(hist.baseline);
+    if (hist.undo.length > HIST_MAX) hist.undo.shift();
+    hist.redo = [];
+  }
+  hist.baseline = s;
+  updateUndoButtons();
+}
+
+function histApply(s) {
+  const o = JSON.parse(s);
+  state.keyframes = { 1: o.k1 || [], 2: o.k2 || [] };
+  state.keep = o.keep || [];
+  state.sfx = o.sfx || [];
+  hist.restoring = true;
+  renderEverything();
+  hist.restoring = false;
+}
+
+function histUndo() {
+  if (!hist.undo.length) return;
+  hist.redo.push(hist.baseline);
+  hist.baseline = hist.undo.pop();
+  histApply(hist.baseline);
+  updateUndoButtons();
+  setStatus('tr-status', 'Undo', 'ok');
+}
+
+function histRedo() {
+  if (!hist.redo.length) return;
+  hist.undo.push(hist.baseline);
+  hist.baseline = hist.redo.pop();
+  histApply(hist.baseline);
+  updateUndoButtons();
+  setStatus('tr-status', 'Redo', 'ok');
+}
+
+function updateUndoButtons() {
+  const u = document.getElementById('btn-undo'), r = document.getElementById('btn-redo');
+  if (u) u.disabled = !hist.undo.length;
+  if (r) r.disabled = !hist.redo.length;
+}
+
+// Re-render every step's UI from state (used after an undo/redo restore).
+function renderEverything() {
+  if (!state.source) return;
+  renderTimeline();
+  redrawOverlay();
+  redrawPreviews();
+  try { renderSfxTrack(); renderSfxList(); } catch (e) { /* step UI not ready */ }
+  try { renderTrimTrack(); renderTrimList(); } catch (e) { /* step UI not ready */ }
+  try { renderWordChips(); } catch (e) { /* no transcript */ }
+  try { updateRangeMeta(); } catch (e) { /* */ }
+}
+
+// ───────────────────────── per-box cut bars (Position step) ─────────────────
+// A "cut" empties a box over a time range. It's stored as a GAP keyframe at the
+// range start + a restore keyframe at the end — so it renders BLACK and persists
+// exactly like any other gap (no backend change). Each gap-region is drawn as a
+// draggable bar: body = move, edges = resize, × = restore the box.
+const CUT_MIN = 0.2;   // shortest cut / drag-clamp gap (seconds)
+
+function renderCutLanes() {
+  if (!state.source) return;
+  const dur = state.source.duration || 1;
+  for (const n of [1, 2]) {
+    const host = els['cuts' + n];
+    if (!host) continue;
+    const kfs = state.keyframes[n];
+    const bars = [];
+    kfs.forEach((k, i) => {
+      const start = k.t;
+      const end = (i + 1 < kfs.length) ? kfs[i + 1].t : dur;
+      if (end - start <= 0.001) return;
+      const left = (start / dur) * 100;
+      const width = Math.max(0.8, ((end - start) / dur) * 100);
+      const endLbl = end >= dur - 1e-3 ? 'end' : end.toFixed(2) + 's';
+      let cls, lbl;
+      if (k.gap) {
+        cls = k.dynamic ? 'cut-bar gap dynamic' : 'cut-bar gap';
+        lbl = (k.dynamic ? 'DYNAMIC' : 'OFF') + ' ' + (end - start).toFixed(1) + 's';
+      } else {
+        cls = 'cut-bar on';
+        lbl = `${Math.round(k.w)}×${Math.round(k.h)}`;
+      }
+      bars.push(
+        `<div class="${cls}" data-box="${n}" data-i="${i}" style="left:${left}%;width:${width}%" ` +
+        `title="Box ${n} ${start.toFixed(2)}–${endLbl}${k.gap ? ' (off)' : ''} — drag body to move, edges to resize` +
+        `${k.gap ? ', double-click to restore' : ''}">` +
+        `<span class="cut-bar-h l"></span>` +
+        `<span class="cut-bar-lbl">${lbl}</span>` +
+        `<span class="cut-bar-h r"></span>` +
+        `</div>`);
+    });
+    host.innerHTML = bars.join('') || '<span class="cut-lane-empty">— no boxes —</span>';
+  }
+}
+
+function addBoxCut(n) {
+  if (!state.source) return;
+  const kfs = state.keyframes[n];
+  if (!kfs.length) {
+    setStatus('tr-status', `Box ${n} has no boxes to cut — draw or auto-box it first`, 'err');
+    return;
+  }
+  const dur = state.source.duration || 0;
+  const a = state.currentTime;
+  const b = Math.min(a + 2.0, dur);   // default 2s window, drag to adjust
+  if (b - a < CUT_MIN + 1e-3) {
+    setStatus('tr-status', 'Move the playhead earlier — not enough room to cut here', 'err');
+    return;
+  }
+  // Geometry that should RESUME at b (sample before editing); null = already off there.
+  const resume = boxAt(n, b);
+  // Placeholder geometry for the gap kf (unused at render — gap → black).
+  const prior = [...kfs].reverse().find(k => k.t <= a + KF_EPS);
+  const refB = resume || (prior ? { x: prior.x, y: prior.y, w: prior.w, h: prior.h }
+                                : { x: 0, y: 0, w: state.source.width, h: state.source.height });
+  // Drop keyframes strictly inside (a, b) so the gap spans the whole window.
+  state.keyframes[n] = kfs.filter(k => !(k.t > a + KF_EPS && k.t < b - KF_EPS));
+  upsertKeyframe(n, { x: refB.x, y: refB.y, w: refB.w, h: refB.h, gap: true }, a);
+  // Restore the box at b (only if it was on there; otherwise the gap just continues).
+  if (resume && b < dur - 1e-3) {
+    upsertKeyframe(n, { x: resume.x, y: resume.y, w: resume.w, h: resume.h }, b);
+  }
+  setStatus('tr-status',
+    `Box ${n} cut ${a.toFixed(2)}–${b.toFixed(2)}s · drag the bar to adjust, × to restore`, 'ok');
+  renderTimeline();
+  redrawOverlay();
+  redrawPreviews();
+}
+
+function onCutBarDblClick(e) {
+  const bar = e.target.closest('.cut-bar');
+  if (!bar) return;
+  removeBoxCut(+bar.dataset.box, +bar.dataset.i);
+}
+
+function onCutBarDown(e) {
+  const bar = e.target.closest('.cut-bar');
+  if (!bar) return;
+  e.preventDefault();
+  const n = +bar.dataset.box, i = +bar.dataset.i;
+  const kfs = state.keyframes[n];
+  const gapK = kfs[i];   // the kf owning this segment (gap OR a real box) — drag retimes it
+  if (!gapK) return;
+  const nextK = (i + 1 < kfs.length) ? kfs[i + 1] : null;
+  const dur = state.source.duration || 1;
+  const rect = els['cuts' + n].getBoundingClientRect();
+  const h = e.target.classList.contains('cut-bar-h');
+  const mode = h && e.target.classList.contains('l') ? 'resize-l'
+             : h && e.target.classList.contains('r') ? 'resize-r'
+             : 'move';
+  state.cutDrag = {
+    n, mode, startX: e.clientX, trackW: rect.width, gapK, nextK,
+    a0: gapK.t, b0: nextK ? nextK.t : dur,
+    hasPrev: i > 0, prevT: i > 0 ? kfs[i - 1].t : 0,
+    afterT: nextK ? (i + 2 < kfs.length ? kfs[i + 2].t : dur) : dur,
+  };
+}
+
+function onCutDragMove(e) {
+  const d = state.cutDrag;
+  if (!d) return;
+  const dur = state.source.duration || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  if (d.mode === 'resize-l') {
+    const lo = d.hasPrev ? d.prevT + CUT_MIN : 0;
+    const ns = Math.max(lo, Math.min(d.a0 + dt, d.b0 - CUT_MIN));
+    d.gapK.t = +ns.toFixed(2);
+  } else if (d.mode === 'resize-r' && d.nextK) {
+    const ne = Math.max(d.gapK.t + CUT_MIN, Math.min(d.b0 + dt, d.afterT - CUT_MIN));
+    d.nextK.t = +Math.min(dur, ne).toFixed(2);
+  } else if (d.mode === 'move') {
+    const len = d.b0 - d.a0;
+    const lo = d.hasPrev ? d.prevT : 0;   // just don't cross the prior kf
+    const hi = d.nextK ? d.afterT - len : dur - CUT_MIN;
+    const ns = Math.max(lo, Math.min(d.a0 + dt, hi));
+    d.gapK.t = +ns.toFixed(2);
+    if (d.nextK) d.nextK.t = +(ns + len).toFixed(2);
+  }
+  state.keyframes[d.n].sort((x, y) => x.t - y.t);
+  renderCutLanes();
+  redrawPreviews();
+}
+
+function _boxesEqual(a, b) {
+  return a && b && Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1
+    && Math.abs(a.w - b.w) < 1 && Math.abs(a.h - b.h) < 1;
+}
+
+function removeBoxCut(n, i) {
+  const kfs = state.keyframes[n];
+  const k = kfs[i];
+  if (!k || !k.gap) return;
+  kfs.splice(i, 1);   // drop the gap kf → the box holds across again (restored)
+  // If the paired restore kf is now a no-op (its box == the kf before it), drop
+  // it too — a static cut leaves no stray kf; a real resume point is kept.
+  const rest = kfs[i], prev = kfs[i - 1];
+  if (rest && !rest.gap && prev && !prev.gap && _boxesEqual(rest, prev)) kfs.splice(i, 1);
+  setStatus('tr-status', `Box ${n} cut removed — box restored here`, 'ok');
+  renderTimeline();
+  redrawOverlay();
+  redrawPreviews();
 }
 
 function renderKfList() {
@@ -716,6 +991,7 @@ function renderKfList() {
       const fit = (kf.fit || 'cover');
       const fitLbl = fit === 'blur_pad' ? 'BLUR PAD' : 'COVER';
       const isGap = !!kf.gap;
+      const isDyn = !!kf.dynamic;   // gap left empty on purpose → draw manually
       const isCur = state.currentTime >= kf.t && (isLast || state.currentTime < endT);
       // Editable start/end — click a time to lengthen/shorten the segment
       // (start = this kf's t, end = the NEXT kf's t; clip end isn't editable).
@@ -729,6 +1005,19 @@ function renderKfList() {
                             title="Click to edit when this segment ENDS (moves the next keyframe)">${formatTime(endT)}</span>`}
         </span>
         <span class="kf-onscreen" title="this segment is what's on screen at the playhead right now">▶ ON SCREEN</span>`;
+      // Dynamic segment: auto-box gave up here (too unstable) → draw it by hand.
+      if (isDyn) {
+        return `
+          <li class="gap dynamic ${isCur ? 'current' : ''}">
+            ${timeHtml}
+            <span class="kf-seg-dims kf-seg-dyn"><span class="dyn-tag">DYNAMIC</span> draw this manually</span>
+            <span class="kf-seg-actions">
+              <button data-act="seek" data-box="${n}" data-idx="${idx}" title="Seek here and draw the box yourself">▶ seek</button>
+              <button data-act="del"  data-box="${n}" data-idx="${idx}" class="danger" title="Remove the marker (segment falls back to black / prior kf)">× clear</button>
+            </span>
+          </li>
+        `;
+      }
       // Gap segment: rendered black, can be removed to restore prior kf's extension.
       if (isGap) {
         return `
@@ -742,11 +1031,12 @@ function renderKfList() {
           </li>
         `;
       }
+      const isMov = !!kf.moving;   // panning track (director / dynamic) → keep linear
       return `
-        <li class="${isCur ? 'current' : ''}">
+        <li class="${isCur ? 'current' : ''}${isMov ? ' moving' : ''}">
           ${timeHtml}
           <span class="kf-seg-dims">${Math.round(kf.w)}×${Math.round(kf.h)} @(${Math.round(kf.x)},${Math.round(kf.y)})</span>
-          <span class="kf-seg-mode ${cls}">${tag}</span>
+          <span class="kf-seg-mode ${cls}">${tag}</span>${isMov ? '<span class="mov-tag" title="tracked: size locked, center pans the moving subject">TRACKED</span>' : ''}
           <span class="kf-seg-actions">
             <button data-act="seek"       data-box="${n}" data-idx="${idx}" title="Seek to this kf">▶ seek</button>
             <button data-act="toggle"     data-box="${n}" data-idx="${idx}" title="Toggle Hold ↔ Linear (interp)">⇄ ${mode}</button>
@@ -813,11 +1103,12 @@ function renderTrack(container, boxNum) {
     const mode = (kf.interp || 'hold');
     const isLast = idx === kfs.length - 1;
     const isGap = !!kf.gap;
+    const isDyn = !!kf.dynamic;
     const dot = document.createElement('div');
-    dot.className = `timeline-dot ${mode}` + (isLast ? ' last' : '') + (isGap ? ' gap' : '');
+    dot.className = `timeline-dot ${mode}` + (isLast ? ' last' : '') + (isGap ? ' gap' : '') + (isDyn ? ' dynamic' : '');
     dot.dataset.box = boxNum;
     dot.style.left = ((kf.t / dur) * 100) + '%';
-    dot.title = `Box ${boxNum} kf #${idx + 1} @ ${kf.t.toFixed(2)}s · ${isGap ? 'GAP (empty segment)' : (isLast ? '(last)' : mode.toUpperCase())} — click to seek`;
+    dot.title = `Box ${boxNum} kf #${idx + 1} @ ${kf.t.toFixed(2)}s · ${isDyn ? 'DYNAMIC (draw manually)' : (isGap ? 'GAP (empty segment)' : (isLast ? '(last)' : mode.toUpperCase()))} — click to seek`;
     dot.addEventListener('click', () => {
       els.video.currentTime = kf.t;
     });
@@ -827,7 +1118,7 @@ function renderTrack(container, boxNum) {
     if (!isLast) {
       const next = kfs[idx + 1];
       const seg = document.createElement('div');
-      seg.className = `timeline-seg ${mode}` + (isGap ? ' gap' : '');
+      seg.className = `timeline-seg ${mode}` + (isGap ? ' gap' : '') + (isDyn ? ' dynamic' : '');
       seg.style.left = ((kf.t / dur) * 100) + '%';
       seg.style.width = (((next.t - kf.t) / dur) * 100) + '%';
       container.appendChild(seg);
@@ -1408,6 +1699,8 @@ async function doAutoBox(n) {
     const res = await apiPost('/api/autobox', {
       job_id: state.jobId, prompt, t_start: t0, t_end: t1, box: n, step_seconds: step,
       lock_size: $('#ab-lock') ? $('#ab-lock').checked : true,
+      director: $('#ab-director') ? $('#ab-director').checked : false,
+      diarization: $('#ab-diarize') ? $('#ab-diarize').checked : false,
     });
     const kfs = res.keyframes || [];
     if (!kfs.length) {
@@ -1417,8 +1710,9 @@ async function doAutoBox(n) {
     // Keep manual keyframes OUTSIDE the predicted range; replace inside it.
     const keep = state.keyframes[n].filter(k => k.t < t0 - KF_EPS || k.t > t1 + KF_EPS);
     state.keyframes[n] = [...keep, ...kfs].sort((a, b) => a.t - b.t);
+    const dnote = res.director_note ? ` · ${res.director_note}` : '';
     setStatus('ab-status',
-      `${res.message} Added ${kfs.length} keyframes to Box ${n} — drag / resize / delete below.`, 'ok');
+      `${res.message} Added ${kfs.length} keyframes to Box ${n} — drag / resize / delete below.${dnote}`, 'ok');
     renderTimeline();
     redrawOverlay();
     redrawPreviews();
@@ -1490,6 +1784,7 @@ async function doDownload() {
     setActiveBox(null);
     els.video.src = res.video_path;
     updatePlayBtn(false);
+    histReset();                   // fresh clip → clear edit history
     setStatus('dl-status', `OK · ${res.width}×${res.height} · ${res.duration.toFixed(1)}s`, 'ok');
     showStep(2);
   } catch (e) {
@@ -2386,11 +2681,15 @@ function wireQueue() {
     if (!f) return;
     const text = await f.text();
     file.value = '';
+    const sel = $('#room-select');
+    const roomId = sel && sel.value ? +sel.value : null;
     setStatus('queue-status', 'Importing…');
     try {
-      const res = await apiPost('/api/queue/import', { content: text });
+      const res = await apiPost('/api/queue/import', { content: text, room_id: roomId });
+      const into = roomId && sel ? ` into room "${sel.options[sel.selectedIndex].text.replace(/ \(\d+\)$/, '')}"` : '';
       setStatus('queue-status',
-        `Added ${res.added}, skipped ${res.skipped} (already queued). Working in the background…`, 'ok');
+        `Added ${res.added}${into}, skipped ${res.skipped} (already queued). Working in the background…`, 'ok');
+      loadRooms();
       refreshQueue();
     } catch (e) {
       setStatus('queue-status', 'Import failed: ' + e.message, 'err');
@@ -2400,9 +2699,64 @@ function wireQueue() {
   if (all) all.addEventListener('click', renderAllReady);
   const stop = $('#btn-queue-stop-box');
   if (stop) stop.addEventListener('click', stopBoxing);
+  const rsel = $('#room-select');
+  if (rsel) rsel.addEventListener('change', refreshQueue);
+  const rnew = $('#btn-room-new');
+  if (rnew) rnew.addEventListener('click', createRoomPrompt);
+  const rdel = $('#btn-room-del');
+  if (rdel) rdel.addEventListener('click', deleteSelectedRoom);
+  loadRooms();
   refreshQueue();
   setInterval(refreshQueue, 3000);   // live status while the worker churns
   setInterval(autosaveQueue, 5000);  // persist box edits on the active job
+}
+
+// ───────────────────────── rooms (queue grouping) ─────────────────────────
+async function loadRooms() {
+  try {
+    const r = await fetch('/api/rooms');
+    if (!r.ok) return;
+    state.rooms = (await r.json()).rooms || [];
+  } catch (e) { return; }
+  const sel = $('#room-select');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All rooms</option>'
+    + state.rooms.map(rm => `<option value="${rm.id}">${escapeHtml(rm.name)} (${rm.jobs})</option>`).join('');
+  // keep the previous selection if it still exists
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+
+async function createRoomPrompt() {
+  const name = (prompt('New room name (e.g. teguh, rzl):') || '').trim();
+  if (!name) return;
+  try {
+    const room = await apiPost('/api/rooms', { name });
+    await loadRooms();
+    const sel = $('#room-select');
+    if (sel) { sel.value = String(room.id); refreshQueue(); }
+    setStatus('queue-status', `Room "${room.name}" ready — imports now go into it.`, 'ok');
+  } catch (e) {
+    setStatus('queue-status', 'Create room failed: ' + e.message, 'err');
+  }
+}
+
+async function deleteSelectedRoom() {
+  const sel = $('#room-select');
+  if (!sel || !sel.value) { setStatus('queue-status', 'Pick a room to delete (not "All rooms").', 'err'); return; }
+  const label = sel.options[sel.selectedIndex].text;
+  if (!confirm(`Delete room "${label}" AND all its clips + downloaded videos? This cannot be undone.`)) return;
+  try {
+    const r = await fetch('/api/rooms/' + sel.value, { method: 'DELETE' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const res = await r.json();
+    sel.value = '';
+    await loadRooms();
+    refreshQueue();
+    setStatus('queue-status', `Room deleted — ${res.deleted_jobs} clip(s) + videos removed.`, 'ok');
+  } catch (e) {
+    setStatus('queue-status', 'Delete room failed: ' + e.message, 'err');
+  }
 }
 
 async function refreshQueue() {
@@ -2455,7 +2809,16 @@ function renderQueueList(jobs, boxEta) {
   }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
-  if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  // Room filter: a selected room shows only its clips; "All rooms" shows everything
+  // (with a per-clip room chip). Progress/counts stay GLOBAL (boxing runs globally).
+  const rsel = $('#room-select');
+  const roomFilter = (rsel && rsel.value) ? +rsel.value : null;
+  const roomName = {};
+  (state.rooms || []).forEach(rm => { roomName[rm.id] = rm.name; });
+  const shown = roomFilter !== null ? jobs.filter(j => j.room_id === roomFilter) : jobs;
+  if (meta) meta.textContent = roomFilter !== null
+    ? `${shown.length} clip(s) in this room · ${jobs.length} total`
+    : `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
   // Stop-boxing button visible only while clips are downloading/waiting/boxing
   const stopBtn = $('#btn-queue-stop-box');
   if (stopBtn) {
@@ -2478,10 +2841,17 @@ function renderQueueList(jobs, boxEta) {
         + (phase ? ` · ${phase}…` : '') + (eta ? ` · ${eta}` : '');
     }
   }
-  ul.innerHTML = jobs.map(j => {
+  if (!shown.length) {
+    ul.innerHTML = '<li class="queue-empty-room">No clips in this room yet — import into it.</li>';
+    return;
+  }
+  ul.innerHTML = shown.map(j => {
     const active = j.key === state.activeQueueKey ? ' active' : '';
     const canOpen = j.status === 'ready' || j.status === 'done';
     const kf = canOpen ? ` · ${j.kf1}+${j.kf2} kf` : '';
+    // room chip (only in "All rooms" view, where clips span multiple rooms)
+    const roomChip = (roomFilter === null && j.room_id && roomName[j.room_id])
+      ? `<span class="q-room">${escapeHtml(roomName[j.room_id])}</span>` : '';
     const renderBtn = canOpen
       ? `<button class="q-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'transcribe + render this clip (queued, runs in background)'}">▶</button>`
       : '';
@@ -2494,13 +2864,18 @@ function renderQueueList(jobs, boxEta) {
     const skip = j.status === 'downloaded'
       ? `<button class="q-skip" data-key="${j.key}" title="Skip AI boxing — open this clip now and draw the boxes manually">✎ manual</button>`
       : '';
+    // A ready clip with NO boxes (boxing was skipped/stopped, or nothing detected)
+    // can be put back through AI boxing — recovers an accidental "Stop boxing".
+    const rebox = (j.status === 'ready' && !j.kf1 && !j.kf2)
+      ? `<button class="q-retry" data-key="${j.key}" title="Re-box: re-run AI boxing on this clip">↻ box</button>`
+      : '';
     return `<li class="queue-item${active}" data-status="${j.status}">
       <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${escapeHtml(j.message || '')}">
         <span class="q-id">${escapeHtml(j.id)}</span>
         <span class="q-title">${escapeHtml(j.title || '')}</span>
-        <span class="q-sub">${statusBadge(j.status)}${kf}</span>
+        <span class="q-sub">${statusBadge(j.status)}${kf}${roomChip}</span>
       </button>
-      ${dl}${renderBtn}${skip}${retry}
+      ${dl}${rebox}${renderBtn}${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
     </li>`;
   }).join('');
@@ -2575,6 +2950,7 @@ async function openQueueJob(key) {
   setActiveBox(null);
   updateRangeMeta();
   state.queueSig = queueSig();       // baseline so autosave only fires on real edits
+  histReset();                       // start edit history fresh for this job
   setStatus('queue-status', `Editing "${job.id}" — box edits auto-save.`, 'ok');
   showStep(2);
   refreshQueue();                    // update the active highlight
@@ -2593,6 +2969,7 @@ function queueSig() {
 
 async function autosaveQueue() {
   if (!state.activeQueueKey) return;
+  if (state.cutDrag) return;   // don't persist a half-dragged cut bar mid-gesture
   const sig = queueSig();
   if (sig === state.queueSig) return;   // nothing changed since last save
   state.queueSig = sig;
