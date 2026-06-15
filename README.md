@@ -68,6 +68,30 @@ python main.py
 
 Open the browser and follow the 3 steps: Source → Position → Render.
 
+## AI auto-box (Director / smart panning / diarization)
+
+In the **Position** step the vision model can draw the crop boxes for you: type what each box should follow (e.g. "the person talking", "the meme on the right"), drag the time range, hit **Generate**. Needs a vision endpoint (`VISION_BASE_URL` / `VISION_MODEL` in `.env`); without it the toggle is hidden and you box by hand.
+
+Two optional toggles sit next to it:
+
+- **Director** — instead of judging each frame alone, it slides a short window over the clip, shows the model several frames **plus the spoken transcript**, and decides the layout (split / fullscreen / content panel), which box is which, and whether the subject is moving. Much better on podcasts / reactions where the camera cuts around. A subject that moves too much to pin is no longer left black — it becomes a smooth **panning** track (shown as a green **TRACKED** chip in the segment list). Turning Director on runs Whisper at boxing time, so it's slower.
+- **Diarize** — adds a "who is speaking" hint so the Director can pick the right person as box 1 when several people alternate. **Off by default**; needs the optional setup below. Without it the Director still decides box 1 visually.
+
+### Optional: speaker diarization (pyannote)
+
+```bash
+source venv/bin/activate
+pip install 'pyannote.audio>=4' torchcodec     # torchaudio must match your torch build
+```
+Then:
+1. Accept the gated-model conditions (free, one click each) at
+   <https://huggingface.co/pyannote/speaker-diarization-3.1> **and**
+   <https://huggingface.co/pyannote/segmentation-3.0>
+2. Create a **read** token at <https://huggingface.co/settings/tokens>
+3. Add `HF_TOKEN=hf_xxx` to `clipper/.env`
+
+Leave `HF_TOKEN` empty to keep diarization off. (On a very new PyTorch where `torchaudio` dropped its audio loaders, the app preloads the bundled CUDA libs so `torchcodec` works — no `LD_LIBRARY_PATH` needed.)
+
 ## GPU acceleration
 
 The encode/decode path auto-detects NVIDIA hardware:
