@@ -151,6 +151,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // playhead; the bars in the cut lanes are then draggable/resizable/removable.
   $('#btn-cut-1').addEventListener('click', () => addBoxCut(1));
   $('#btn-cut-2').addEventListener('click', () => addBoxCut(2));
+  $('#btn-split-1') && $('#btn-split-1').addEventListener('click', () => addBoxSplit(1));
+  $('#btn-split-2') && $('#btn-split-2').addEventListener('click', () => addBoxSplit(2));
   els.cuts1.addEventListener('mousedown', onCutBarDown);
   els.cuts2.addEventListener('mousedown', onCutBarDown);
   els.cuts1.addEventListener('dblclick', onCutBarDblClick);
@@ -880,6 +882,45 @@ function addBoxCut(n) {
   }
   setStatus('tr-status',
     `Box ${n} cut ${a.toFixed(2)}–${b.toFixed(2)}s · drag the bar to adjust, × to restore`, 'ok');
+  renderTimeline();
+  redrawOverlay();
+  redrawPreviews();
+}
+
+function addBoxSplit(n) {
+  // Carve an EDITABLE sub-segment out of a box (vs addBoxCut which carves a black
+  // gap): the middle window starts as a COPY of the current box, the surrounding
+  // box resumes after — so the user scrubs into the window + redraws ONLY that
+  // stretch (e.g. frames 40–50 get a different bbox while 1–40 / 50–100 stay).
+  if (!state.source) return;
+  const kfs = state.keyframes[n];
+  if (!kfs.length) {
+    setStatus('tr-status', `Box ${n} has no boxes to split — draw or auto-box it first`, 'err');
+    return;
+  }
+  const dur = state.source.duration || 0;
+  const a = state.currentTime;
+  const cur = boxAt(n, a);            // box visible here — must exist to split
+  if (!cur) {
+    setStatus('tr-status', `Box ${n} is empty (off) here — scrub to where it shows, then split`, 'err');
+    return;
+  }
+  const b = Math.min(a + 2.0, dur);   // default 2s window, drag the bar edges to adjust
+  if (b - a < CUT_MIN + 1e-3) {
+    setStatus('tr-status', 'Move the playhead earlier — not enough room to split here', 'err');
+    return;
+  }
+  const resume = boxAt(n, b);         // box to RESTORE after the carved window
+  // drop kfs strictly inside (a,b) so the carved window is one editable box
+  state.keyframes[n] = kfs.filter(k => !(k.t > a + KF_EPS && k.t < b - KF_EPS));
+  // middle window = a copy of the current box (edit it by scrubbing in + drawing)
+  upsertKeyframe(n, { x: cur.x, y: cur.y, w: cur.w, h: cur.h }, a);
+  // restore the surrounding box right after, so ONLY the window differs
+  if (resume && b < dur - 1e-3) {
+    upsertKeyframe(n, { x: resume.x, y: resume.y, w: resume.w, h: resume.h }, b);
+  }
+  setStatus('tr-status',
+    `Box ${n} split ${a.toFixed(2)}–${b.toFixed(2)}s · scrub into this window + draw to change it; drag the bar edges to resize`, 'ok');
   renderTimeline();
   redrawOverlay();
   redrawPreviews();
@@ -2809,6 +2850,10 @@ function renderQueueList(jobs, boxEta) {
   }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0) + (c.render_queued || 0) + (c.rendering || 0);
+  // Clips parked because the vision endpoint is unreachable — auto re-box when it
+  // returns. Detected from the HOLD message so we don't need a new status.
+  const waiting = jobs.filter(j => /endpoint down|^HOLD/i.test(j.message || '')).length;
+  const waitNote = waiting ? ` · ${waiting} waiting (vision endpoint down — auto-resumes)` : '';
   // Room filter: a selected room shows only its clips; "All rooms" shows everything
   // (with a per-clip room chip). Progress/counts stay GLOBAL (boxing runs globally).
   const rsel = $('#room-select');
@@ -2816,9 +2861,13 @@ function renderQueueList(jobs, boxEta) {
   const roomName = {};
   (state.rooms || []).forEach(rm => { roomName[rm.id] = rm.name; });
   const shown = roomFilter !== null ? jobs.filter(j => j.room_id === roomFilter) : jobs;
-  if (meta) meta.textContent = roomFilter !== null
-    ? `${shown.length} clip(s) in this room · ${jobs.length} total`
-    : `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  if (meta) {
+    meta.textContent = (roomFilter !== null
+      ? `${shown.length} clip(s) in this room · ${jobs.length} total`
+      : `${jobs.length} job(s) · ${c.ready || 0} ready · ${c.done || 0} done · ${working} working${c.error ? ` · ${c.error} error` : ''}`)
+      + waitNote;
+    meta.classList.toggle('queue-meta-warn', waiting > 0);
+  }
   // Stop-boxing button visible only while clips are downloading/waiting/boxing
   const stopBtn = $('#btn-queue-stop-box');
   if (stopBtn) {

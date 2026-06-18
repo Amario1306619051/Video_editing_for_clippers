@@ -1068,6 +1068,7 @@ kbd {
 .queue-title { font-family: var(--display); font-weight: 700; font-size: 14px; flex: 1; }
 button.small { padding: 4px 9px; font-size: 12px; }
 .queue-meta { font-size: 11px; color: var(--text-dim); }
+.queue-meta.queue-meta-warn { color: var(--accent-2); font-weight: 600; }
 /* Room bar (queue grouping) */
 .room-bar { display: flex; align-items: center; gap: 5px; margin: 6px 0; }
 .room-bar select {
