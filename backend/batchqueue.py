@@ -95,6 +95,7 @@ _JOB_COLS = [
     "step_seconds", "room_id", "director", "diarization", "transcript", "expect",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
+    "qc_score", "qc_issues",
 ]
 
 
@@ -137,7 +138,8 @@ def _init_db() -> None:
             director INTEGER, diarization INTEGER, transcript TEXT, expect TEXT,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
-            output_path TEXT, filename TEXT
+            output_path TEXT, filename TEXT,
+            qc_score INTEGER, qc_issues TEXT
         )''')
         # Migrations for DBs created before these columns existed.
         for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
@@ -148,6 +150,8 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN diarization INTEGER",
                     "ALTER TABLE jobs ADD COLUMN transcript TEXT",
                     "ALTER TABLE jobs ADD COLUMN expect TEXT",
+                    "ALTER TABLE jobs ADD COLUMN qc_score INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN qc_issues TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -417,6 +421,7 @@ def list_jobs() -> list[dict]:
                 "kf1": c.get(1, 0), "kf2": c.get(2, 0),
                 "ready": bool(r["job_id"]), "room_id": r["room_id"],
                 "output_path": r["output_path"], "filename": r["filename"],
+                "qc_score": r["qc_score"], "qc_issues": r["qc_issues"] or "",
             })
         return out
 
@@ -697,6 +702,20 @@ def _predict_boxes(job: dict) -> None:
                 box1 = autobox.settle_track(box1, w_, h_)
             if box2:
                 box2 = autobox.settle_track(box2, w_, h_)
+            # TIMING (continuity): snap each box's on/off transition onto the REAL
+            # scene-cut so it appears/disappears exactly when the content cuts (not
+            # ~0.5s early as the detector caught a slide/fade-in). Director clips only.
+            if job.get("director") and (box1 or box2):
+                try:
+                    cuts = autobox._detect_scene_cuts(src)
+                    # always snap (the fn also applies the soft-ON appear-lag when no
+                    # hard cut is near → boxes don't appear before slide/fade-in settles)
+                    if box1:
+                        box1 = autobox.snap_transitions_to_cuts(box1, cuts)
+                    if box2:
+                        box2 = autobox.snap_transitions_to_cuts(box2, cuts)
+                except Exception as e:  # noqa: BLE001 — best-effort
+                    log.warning("cut-snap failed (%s): %s", job["id"], e)
         # SELF-VERIFY (director clips only): render the FINAL crops and ask the VLM
         # if each segment is well-framed / the right subject → gap wrong-subject,
         # widen cut-off. Best-effort (pass on garbage); runs LAST, on the boxes the
@@ -744,10 +763,29 @@ def _predict_boxes(job: dict) -> None:
                 message=f"downloaded — box predict failed: {e} (draw manually)")
         return
 
+    # QC TRIAGE (director clips): score the FINISHED framing + list issues so the
+    # sidebar can surface the worst clips for a human pass. Best-effort.
+    qc_val = None
+    qc_issues = ""
+    if job.get("director") and (box1 or box2) and w_ and h_ and vision.enabled():
+        try:
+            _update(key, message="qc: scoring framing…")
+            qc = autobox.qc_clip(src, box1 or [], box2 or [], w_, h_,
+                                 float(job.get("duration") or 0),
+                                 expect=(job.get("expect") or ""))
+            if qc:
+                qc_val = qc.get("score")
+                qc_issues = "; ".join(qc.get("issues") or [])
+        except Exception as e:  # noqa: BLE001 — QC is best-effort
+            log.warning("qc_clip failed (%s): %s", job["id"], e)
+
     msg = "ready — open to fine-tune"
+    if qc_val is not None:
+        msg += f" · QC {qc_val}/100"
     if notes:
         msg += " · " + ", ".join(notes)
-    _update(key, status="ready", box1=box1, box2=box2, message=msg)
+    _update(key, status="ready", box1=box1, box2=box2, message=msg,
+            qc_score=qc_val, qc_issues=qc_issues)
 
 
 def _render_one(job: dict) -> None:

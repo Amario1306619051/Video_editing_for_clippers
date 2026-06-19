@@ -1079,6 +1079,13 @@ button.small { padding: 4px 9px; font-size: 12px; }
   margin-left: 6px; font-size: 9px; letter-spacing: .04em; color: var(--accent);
   border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px;
 }
+.q-qc {
+  margin-left: 6px; font-size: 9px; letter-spacing: .04em; font-weight: 600;
+  border-radius: 999px; padding: 0 6px; border: 1px solid currentColor;
+}
+.q-qc.good { color: #56d364; }
+.q-qc.warn { color: #e3b341; }
+.q-qc.bad  { color: var(--accent-2); }
 .queue-empty-room { font-size: 11px; color: var(--text-mute); font-style: italic; padding: 8px 2px; list-style: none; }
 .queue-progress { margin: 8px 0 4px; }
 .queue-progress.hidden { display: none; }
@@ -1313,3 +1320,15 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .sfx-bar-l { left: 0; }
 .sfx-bar-r { right: 0; }
 .sfx-pin { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; color: var(--accent); font-size: 16px; cursor: grab; transform: translateX(-50%); padding: 0 4px; }
+
+/* Segmenter (scout) panel — propose clips from a transcript / URL */
+.segmenter-panel { display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  margin: 6px 0; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 8px; }
+.seg-row { display: flex; gap: 6px; }
+.seg-row #seg-n { width: 64px; flex: 0 0 auto; }
+.segmenter-panel select, .segmenter-panel input, .segmenter-panel textarea {
+  width: 100%; font-size: 11px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+.segmenter-panel textarea { font-family: ui-monospace, monospace; resize: vertical; }
+.segmenter-panel.hidden { display: none; }
+.segmenter-panel .hidden { display: none; }

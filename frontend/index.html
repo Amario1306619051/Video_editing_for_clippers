@@ -36,8 +36,27 @@
   <aside class="queue-sidebar" id="queue-sidebar">
     <div class="queue-head">
       <span class="queue-title">⚙ Queue</span>
-      <button id="btn-queue-import" class="ghost small" title="Load a JSON of clips — the model downloads + auto-boxes them in the background">+ JSON</button>
+      <button id="btn-queue-import" class="ghost small" title="Manual mode: load a JSON of clips you prepared — downloaded + auto-boxed in the background">+ JSON</button>
+      <button id="btn-segmenter" class="ghost small" title="Segmenter mode: let the model propose the clip moments from a transcript or a full video URL">✦ Segmenter</button>
       <input type="file" id="queue-file" accept=".json,application/json,.txt" hidden>
+    </div>
+    <div class="segmenter-panel hidden" id="segmenter-panel">
+      <div class="seg-row">
+        <select id="seg-mode" title="Where the transcript comes from">
+          <option value="transcript">Paste transcript / SRT</option>
+          <option value="url">Full YouTube URL (auto)</option>
+        </select>
+        <input type="number" id="seg-n" min="1" max="30" value="10" title="How many clips to propose">
+      </div>
+      <input type="text" id="seg-url" placeholder="Video URL (required for URL mode; else just labels the clips)">
+      <textarea id="seg-transcript" rows="4" placeholder="Paste SRT or timestamped transcript here (transcript mode)"></textarea>
+      <div class="seg-row">
+        <button id="btn-seg-suggest" class="primary small">✦ Suggest clips</button>
+        <button id="btn-seg-cancel" class="ghost small">Cancel</button>
+      </div>
+      <span class="status" id="seg-status"></span>
+      <textarea id="seg-result" rows="6" placeholder="Proposed clips (editable JSON) appear here — review, then Import" class="hidden"></textarea>
+      <button id="btn-seg-import" class="primary small hidden" title="Import the proposed clips into the queue (manual import path)">↳ Import these</button>
     </div>
     <div class="room-bar">
       <select id="room-select" title="Filter jobs by room; imports go into the selected room">

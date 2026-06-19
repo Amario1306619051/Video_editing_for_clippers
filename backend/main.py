@@ -1,3 +1,4 @@
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -15,6 +16,7 @@ import diarize
 import downloader
 import pexels
 import renderer
+import segmenter
 import soundboard
 import thumbnail
 import transcriber
@@ -27,7 +29,7 @@ from models import (
     CleanupRequest,
     AutoBoxRequest, AutoBoxResponse,
     ThumbnailTextRequest, ThumbnailTextResponse,
-    QueueImportRequest, QueueJobPatch, RoomCreate,
+    QueueImportRequest, QueueJobPatch, RoomCreate, SegmentRequest,
     SoundPatch, DetectSilenceRequest,
     SearchRequest, SearchResponse,
     TtsRequest,
@@ -199,7 +201,7 @@ def api_capabilities():
     headline ideas)."""
     return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled(),
             "pexels": pexels.enabled(), "tts": tts.enabled(),
-            "diarize": diarize.enabled()}
+            "diarize": diarize.enabled(), "segment": segmenter.enabled()}
 
 
 @app.post("/api/cleanup")
@@ -490,6 +492,44 @@ def serve_output(name: str):
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(p, media_type="video/mp4", filename=name)
+
+
+@app.post("/api/segment")
+def api_segment(req: SegmentRequest):
+    """Scout/segmenter: propose clip moments from a video. mode='transcript' uses a
+    pasted SRT/timestamped transcript (fast); mode='url' downloads + Whispers the
+    whole video first (heavy). Returns the proposed clips + a ready-to-edit import
+    JSON that pre-fills the manual import box."""
+    if not segmenter.enabled():
+        raise HTTPException(status_code=503, detail="segmenter text model not configured")
+    url = (req.url or "").strip()
+    duration = 0.0
+    if (req.mode or "transcript").strip().lower() == "url":
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required for URL mode")
+        try:
+            res = downloader.download(url, "00:00:00", None, req.title or "video")
+            src = downloader.get_source_path(res["job_id"])
+            words = transcriber.transcribe(src)
+            transcript = segmenter.transcript_from_words(words)
+            duration = float(res.get("duration") or 0)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"download/transcribe failed: {e}")
+    else:
+        transcript = segmenter.normalize_transcript(req.transcript or "")
+        if not transcript.strip():
+            raise HTTPException(status_code=400,
+                                detail="paste a transcript (SRT or timestamped text) first")
+    try:
+        clips = segmenter.propose_clips(transcript, req.title, req.description, req.n, duration)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"segmenter failed: {e}")
+    if not clips:
+        raise HTTPException(status_code=422,
+                            detail="no clips proposed — try a longer / timestamped transcript")
+    import_obj = {(url or "PASTE_THE_VIDEO_URL_HERE"): clips}
+    return {"clips": clips, "count": len(clips), "url": url,
+            "import_json": json.dumps(import_obj, indent=2, ensure_ascii=False)}
 
 
 # Static mount MUST be last — it's a catch-all.

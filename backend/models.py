@@ -268,6 +268,18 @@ class RoomCreate(BaseModel):
     name: str
 
 
+class SegmentRequest(BaseModel):
+    """Scout/segmenter input. `mode`='transcript' → propose clips from a pasted
+    SRT / timestamped transcript (fast); `mode`='url' → download + Whisper the
+    whole video first (heavy). Returns proposed clips that pre-fill the import."""
+    mode: str = "transcript"
+    url: str = ""
+    transcript: str = ""
+    title: str = ""
+    description: str = ""
+    n: int = 10
+
+
 class QueueJobPatch(BaseModel):
     """Edits saved back to a queue job from the editor (auto-save). All optional —
     only the provided fields are written."""

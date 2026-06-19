@@ -2708,6 +2708,48 @@ async function downloadThumb() {
   }
 }
 
+// ───────────────────────── segmenter (scout) ─────────────────────────
+async function onSegSuggest() {
+  const mode = ($('#seg-mode') || {}).value || 'transcript';
+  const url = ($('#seg-url') || {}).value ? $('#seg-url').value.trim() : '';
+  const transcript = ($('#seg-transcript') || {}).value || '';
+  const n = +(($('#seg-n') || {}).value || 10);
+  setStatus('seg-status', mode === 'url'
+    ? 'Downloading + transcribing the whole video… (can take a few minutes)'
+    : 'Asking the model for clip moments…');
+  const sug = $('#btn-seg-suggest');
+  if (sug) sug.disabled = true;
+  try {
+    const res = await apiPost('/api/segment', { mode, url, transcript, n });
+    const out = $('#seg-result');
+    out.value = res.import_json;
+    out.classList.remove('hidden');
+    $('#btn-seg-import').classList.remove('hidden');
+    setStatus('seg-status', `Proposed ${res.count} clip(s) — review/edit the JSON below, then Import.`, 'ok');
+  } catch (e) {
+    setStatus('seg-status', 'Failed: ' + e.message, 'err');
+  } finally {
+    if (sug) sug.disabled = false;
+  }
+}
+
+async function onSegImport() {
+  const text = ($('#seg-result') || {}).value || '';
+  const sel = $('#room-select');
+  const roomId = sel && sel.value ? +sel.value : null;
+  setStatus('seg-status', 'Importing…');
+  try {
+    const res = await apiPost('/api/queue/import', { content: text, room_id: roomId });
+    setStatus('seg-status', `Added ${res.added}, skipped ${res.skipped}. Working in the background…`, 'ok');
+    const panel = $('#segmenter-panel');
+    if (panel) panel.classList.add('hidden');
+    loadRooms();
+    refreshQueue();
+  } catch (e) {
+    setStatus('seg-status', 'Import failed: ' + e.message, 'err');
+  }
+}
+
 // ───────────────────────── batch queue (sidebar) ─────────────────────────
 // Upload a JSON of clips → the backend worker downloads + auto-boxes each one in
 // the background (persisted across restarts). The sidebar lists jobs by id; open
@@ -2736,6 +2778,19 @@ function wireQueue() {
       setStatus('queue-status', 'Import failed: ' + e.message, 'err');
     }
   });
+  // Segmenter mode — the model proposes clips; review the JSON, then import it
+  // through the same manual path.
+  const segBtn = $('#btn-segmenter');
+  const segPanel = $('#segmenter-panel');
+  if (segBtn && segPanel) {
+    segBtn.addEventListener('click', () => segPanel.classList.toggle('hidden'));
+    const segCancel = $('#btn-seg-cancel');
+    if (segCancel) segCancel.addEventListener('click', () => segPanel.classList.add('hidden'));
+    const segSug = $('#btn-seg-suggest');
+    if (segSug) segSug.addEventListener('click', onSegSuggest);
+    const segImp = $('#btn-seg-import');
+    if (segImp) segImp.addEventListener('click', onSegImport);
+  }
   const all = $('#btn-queue-render-all');
   if (all) all.addEventListener('click', renderAllReady);
   const stop = $('#btn-queue-stop-box');
@@ -2901,6 +2956,9 @@ function renderQueueList(jobs, boxEta) {
     // room chip (only in "All rooms" view, where clips span multiple rooms)
     const roomChip = (roomFilter === null && j.room_id && roomName[j.room_id])
       ? `<span class="q-room">${escapeHtml(roomName[j.room_id])}</span>` : '';
+    // QC triage chip: framing score (green ≥80 / amber 60-79 / red <60); issues on hover
+    const qc = (j.qc_score !== null && j.qc_score !== undefined && j.qc_score !== '')
+      ? `<span class="q-qc ${j.qc_score >= 80 ? 'good' : j.qc_score >= 60 ? 'warn' : 'bad'}" title="${escapeHtml(j.qc_issues || 'framing OK')}">QC ${j.qc_score}</span>` : '';
     const renderBtn = canOpen
       ? `<button class="q-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'transcribe + render this clip (queued, runs in background)'}">▶</button>`
       : '';
@@ -2922,7 +2980,7 @@ function renderQueueList(jobs, boxEta) {
       <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${escapeHtml(j.message || '')}">
         <span class="q-id">${escapeHtml(j.id)}</span>
         <span class="q-title">${escapeHtml(j.title || '')}</span>
-        <span class="q-sub">${statusBadge(j.status)}${kf}${roomChip}</span>
+        <span class="q-sub">${statusBadge(j.status)}${kf}${roomChip}${qc}</span>
       </button>
       ${dl}${rebox}${renderBtn}${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
