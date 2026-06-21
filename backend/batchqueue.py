@@ -45,7 +45,7 @@ import downloader
 import renderer
 import transcriber
 import vision
-from models import Keyframe, Word
+from models import IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +95,9 @@ _JOB_COLS = [
     "step_seconds", "room_id", "director", "diarization", "transcript", "expect",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
-    "qc_score", "qc_issues",
+    "qc_score", "qc_issues", "thumbnail",
+    # per-clip edits from the Sound / Illustration / Trim / Render steps (JSON blobs)
+    "sfx", "illustrations", "keep_segments", "caption",
 ]
 
 
@@ -139,7 +141,8 @@ def _init_db() -> None:
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT,
-            qc_score INTEGER, qc_issues TEXT
+            qc_score INTEGER, qc_issues TEXT, thumbnail TEXT,
+            sfx TEXT, illustrations TEXT, keep_segments TEXT, caption TEXT
         )''')
         # Migrations for DBs created before these columns existed.
         for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
@@ -152,6 +155,11 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN expect TEXT",
                     "ALTER TABLE jobs ADD COLUMN qc_score INTEGER",
                     "ALTER TABLE jobs ADD COLUMN qc_issues TEXT",
+                    "ALTER TABLE jobs ADD COLUMN thumbnail TEXT",
+                    "ALTER TABLE jobs ADD COLUMN sfx TEXT",
+                    "ALTER TABLE jobs ADD COLUMN illustrations TEXT",
+                    "ALTER TABLE jobs ADD COLUMN keep_segments TEXT",
+                    "ALTER TABLE jobs ADD COLUMN caption TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -271,7 +279,7 @@ def _to_float(v) -> Optional[float]:
 
 
 def _clip_to_job(url: str, clip: dict, default_context: str = "",
-                 default_director: bool = False, default_diar: bool = False,
+                 default_director: bool = True, default_diar: bool = True,
                  default_expect: str = "") -> dict:
     cid = str(clip.get("id") or uuid.uuid4().hex[:8])
     return {
@@ -335,8 +343,8 @@ def import_text(content: str, room_id=None) -> dict:
     default_context = str(data.pop("_context", "") or "")
     # File-level defaults for the Phase 2/3 toggles (per-clip "director"/"diarization"
     # override these). underscore = clearly not a URL, popped before the URL loop.
-    default_director = bool(data.pop("_director", False))
-    default_diar = bool(data.pop("_diarization", False))
+    default_director = bool(data.pop("_director", True))
+    default_diar = bool(data.pop("_diarization", True))
     default_expect = str(data.pop("_expect", "") or "")
     rid = int(room_id) if room_id not in (None, "", "all") else None
 
@@ -433,7 +441,8 @@ def get_job(key: str) -> Optional[dict]:
 def save_job(key: str, patch: dict) -> Optional[dict]:
     """Persist edits from the editor (title + keyframes). Only known fields."""
     allowed = {k: patch[k] for k in
-               ("title", "box1", "box2", "description", "context", "prompt1", "prompt2")
+               ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
+                "thumbnail", "sfx", "illustrations", "keep_segments", "caption", "transcript")
                if k in patch}
     if not allowed:
         return _find(key)
@@ -824,14 +833,57 @@ def _render_one(job: dict) -> None:
         _update(key, status="error", message=f"transcribe failed: {e}")
         return
 
-    _update(key, status="rendering", message="rendering + caption…")
+    _update(key, status="rendering", message="rendering… 0%")
+    # Live render progress → job message ("rendering… NN%"). Throttled so we don't
+    # hammer SQLite: persist only when the integer % changes AND ≥0.7s elapsed.
+    _prog = {"pct": -1, "t": 0.0}
+    def _on_progress(frac: float) -> None:
+        pct = int(frac * 100)
+        now = time.monotonic()
+        if pct != _prog["pct"] and (now - _prog["t"] > 0.7 or pct >= 100):
+            _prog["pct"] = pct
+            _prog["t"] = now
+            _update(key, message=f"rendering… {pct}%")
+    # Per-clip edits saved from the editor steps (Trim / Sound / Illustration /
+    # caption). Each is a JSON string column; honor them so the queue render
+    # matches what the user set up — not just the boxes.
+    def _pj(val, default):
+        if not val:
+            return default
+        try:
+            return json.loads(val)
+        except Exception:  # noqa: BLE001
+            return default
+    keep = [KeepSegment(**k) for k in _pj(job.get("keep_segments"), []) if isinstance(k, dict)]
+    sfx = [SfxPlacement(**s) for s in _pj(job.get("sfx"), []) if isinstance(s, dict)]
+    ills = [IllustrationPick(**c) for c in _pj(job.get("illustrations"), []) if isinstance(c, dict)]
+    cap = _pj(job.get("caption"), {}) or {}
+    cap_font = cap.get("font") or CAPTION_FONT
+    cap_size = int(cap.get("size") or CAPTION_SIZE)
+    # Intro card (lives inside the saved thumbnail config). When enabled, the
+    # frontend uploaded temp/{job}_intro.png on ▶; _prepend_intro applies the
+    # transition (incl. crumple + its SFX) and is a no-op if the PNG is missing.
+    thumb_cfg = _pj(job.get("thumbnail"), {}) or {}
+    intro_cfg = thumb_cfg.get("intro") if isinstance(thumb_cfg, dict) else None
+    intro = None
+    if isinstance(intro_cfg, dict) and intro_cfg.get("enabled"):
+        intro = IntroConfig(
+            transition=intro_cfg.get("transition") or "fade",
+            duration=float(intro_cfg.get("duration") or 4),
+            text=(thumb_cfg.get("text") or job.get("title") or "").strip(),
+            voice=bool(intro_cfg.get("voice", True)),
+            engine=intro_cfg.get("engine") or "gtts",
+        )
     try:
         kf1 = [Keyframe(**k) for k in b1] or None
         kf2 = [Keyframe(**k) for k in b2] or None
         out = renderer.render(
             job_id=job["job_id"], source_path=src, title=job.get("title") or "clip",
             box1=kf1, box2=kf2, words=words,
-            caption_font=CAPTION_FONT, caption_size=CAPTION_SIZE,
+            caption_font=cap_font, caption_size=cap_size,
+            keep_segments=keep or None, sfx=sfx or None, illustrations=ills or None,
+            intro=intro,
+            progress_cb=_on_progress,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("queue render failed (%s): %s", job["id"], e)

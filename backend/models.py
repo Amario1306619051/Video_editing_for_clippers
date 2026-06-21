@@ -292,3 +292,12 @@ class QueueJobPatch(BaseModel):
     context: Optional[str] = None
     prompt1: Optional[str] = None
     prompt2: Optional[str] = None
+    # Per-clip edits from the other steps, each a JSON string, so EVERY page
+    # auto-saves: thumbnail (headline+style), sfx (Sound), illustrations
+    # (Illustration cutaways), keep_segments (Trim), caption (font/size).
+    thumbnail: Optional[str] = None
+    sfx: Optional[str] = None
+    illustrations: Optional[str] = None
+    keep_segments: Optional[str] = None
+    caption: Optional[str] = None
+    transcript: Optional[str] = None   # edited transcript (JSON list of {word,start,end})

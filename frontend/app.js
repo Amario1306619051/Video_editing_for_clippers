@@ -29,6 +29,7 @@ const state = {
   keyframes: { 1: [], 2: [] },
   activeBox: null,          // null = canvas inactive ; 1 or 2 = active draw target
   currentTime: 0,
+  tlZoom: 1,                              // Position-step timeline horizontal zoom (1 = fit width)
   words: [],
   caption: { font: 'Anton', size: 64 },  // must match the default <option> in index.html
   renderRange: { start: null, end: null },  // sub-range in seconds, null = open
@@ -73,7 +74,10 @@ document.addEventListener('DOMContentLoaded', () => {
   els.dots2 = $('#dots-2');
   els.cuts1 = $('#cuts-1');
   els.cuts2 = $('#cuts-2');
-  els.timelineCursor = $('#timeline-cursor');
+  els.tlScroll = $('#tl-scroll');
+  els.tlInner = $('#tl-inner');
+  els.tlPlayhead = $('#tl-playhead');
+  els.tlZoomVal = $('#tl-zoom-val');
   els.curTime = $('#cur-time');
   els.kfCount1 = $('#kf-count-1');
   els.kfCount2 = $('#kf-count-2');
@@ -99,6 +103,8 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-continue').addEventListener('click', doContinue);
   $('#btn-render').addEventListener('click', doRender);
   $('#btn-render-nocap').addEventListener('click', doRenderNoCaption);
+  $('#btn-tr-transcribe') && $('#btn-tr-transcribe').addEventListener('click', transcribeForEdit);
+  $('#btn-tr-clear') && $('#btn-tr-clear').addEventListener('click', clearTranscript);
 
   // Render sub-range inputs
   $('#rd-start').addEventListener('input', onRangeInput);
@@ -125,7 +131,22 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-fwd-1').addEventListener('click', () => seekBy(+1));
   $('#scrubber').addEventListener('input', (e) => {
     if (!els.video.duration) return;
-    els.video.currentTime = +e.target.value;
+    const t = +e.target.value;
+    els.video.currentTime = t;
+    state.currentTime = t;          // optimistic — move the playhead now, don't wait for seek
+    updateTimelineCursor();
+  });
+
+  // Playback-speed buttons (Position + Trim). playbackRate resets to 1 when a new
+  // src loads, so reapplySpeed() re-asserts the chosen rate on loadedmetadata.
+  document.querySelectorAll('.speed-ctrl').forEach(grp => {
+    grp.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-speed]');
+      if (!btn) return;
+      const vid = grp.dataset.vid === 'trim' ? els.trimVideo : els.video;
+      if (vid) vid.playbackRate = +btn.dataset.speed;
+      grp.querySelectorAll('.speed-btn').forEach(b => b.classList.toggle('active', b === btn));
+    });
   });
 
   document.querySelectorAll('.box-pill').forEach((pill, idx) => {
@@ -155,6 +176,12 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-split-2') && $('#btn-split-2').addEventListener('click', () => addBoxSplit(2));
   els.cuts1.addEventListener('mousedown', onCutBarDown);
   els.cuts2.addEventListener('mousedown', onCutBarDown);
+  // Timeline zoom: widens #tl-inner so dots + both cut-lanes stretch together
+  // (they're %-based) and the row becomes horizontally scrollable for precise sync.
+  $('#tl-zoom-in') && $('#tl-zoom-in').addEventListener('click', () => setTlZoom(state.tlZoom * 1.5, true));
+  $('#tl-zoom-out') && $('#tl-zoom-out').addEventListener('click', () => setTlZoom(state.tlZoom / 1.5, true));
+  $('#tl-zoom-reset') && $('#tl-zoom-reset').addEventListener('click', () => setTlZoom(1, false));
+  els.tlScroll && els.tlScroll.addEventListener('scroll', updateTimelineCursor);
   els.cuts1.addEventListener('dblclick', onCutBarDblClick);
   els.cuts2.addEventListener('dblclick', onCutBarDblClick);
   window.addEventListener('mousemove', onCutDragMove);
@@ -217,6 +244,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const dur = els.video.duration || 0;
     $('#scrubber').max = dur;
     $('#time-dur').textContent = formatTime(dur);
+    reapplySpeed('main');
   });
   els.video.addEventListener('timeupdate', onTimeUpdate);
   els.video.addEventListener('seeked', onTimeUpdate);
@@ -297,8 +325,9 @@ function canGoToStep(n) {
 
 function showStep(n) {
   state.step = n;
-  for (let i = 1; i <= 7; i++) {
-    $(`#panel-${i}`).classList.toggle('hidden', i !== n);
+  for (let i = 1; i <= 8; i++) {
+    const p = $(`#panel-${i}`);
+    if (p) p.classList.toggle('hidden', i !== n);
   }
   document.querySelectorAll('.steps .step').forEach(b => {
     b.classList.toggle('active', +b.dataset.step === n);
@@ -327,7 +356,7 @@ function showStep(n) {
     requestAnimationFrame(initIllStep);
   }
   if (n === 7) {
-    requestAnimationFrame(initTrimStep);
+    requestAnimationFrame(() => { initTrimStep(); initTranscriptStep(); });
   }
 }
 
@@ -705,14 +734,42 @@ function updateKfListHighlight() {
   }
 }
 
+// Re-assert the chosen playback speed (the browser resets playbackRate to 1 on
+// each new src load). vidKey = 'main' (Position) | 'trim'.
+function reapplySpeed(vidKey) {
+  const grp = document.querySelector(`.speed-ctrl[data-vid="${vidKey}"]`);
+  const vid = vidKey === 'trim' ? els.trimVideo : els.video;
+  if (!grp || !vid) return;
+  const active = grp.querySelector('.speed-btn.active');
+  vid.playbackRate = active ? +active.dataset.speed : 1;
+}
+
+function setTlZoom(z, centerOnPlayhead) {
+  z = Math.max(1, Math.min(20, z));
+  state.tlZoom = z;
+  if (els.tlInner) els.tlInner.style.width = (z * 100) + '%';
+  if (els.tlZoomVal) els.tlZoomVal.textContent = (Math.round(z * 10) / 10) + '×';
+  // keep the playhead in view after a zoom so the user doesn't lose their place
+  if (centerOnPlayhead && els.tlScroll && els.tlInner && state.source && state.source.duration > 0) {
+    const frac = state.currentTime / state.source.duration;
+    const target = frac * els.tlInner.scrollWidth - els.tlScroll.clientWidth / 2;
+    els.tlScroll.scrollLeft = Math.max(0, target);
+  }
+  updateTimelineCursor();
+}
+
 function updateTimelineCursor() {
-  if (!state.source || !els.dots1) return;
+  if (!els.tlPlayhead) return;
+  if (!state.source || !els.dots1 || !els.tlInner) { els.tlPlayhead.style.display = 'none'; return; }
+  els.tlPlayhead.style.display = '';
+  // position the full-height playhead relative to #tl-inner so it lines up with
+  // BOTH the timeline dots and the cut-lane bars (they share the same time axis)
+  const innerR = els.tlInner.getBoundingClientRect();
   const r = els.dots1.getBoundingClientRect();
-  const trackR = els.dots1.parentElement.parentElement.getBoundingClientRect();
-  const x = r.left - trackR.left + (state.source.duration > 0
+  const x = (r.left - innerR.left) + (state.source.duration > 0
     ? (state.currentTime / state.source.duration) * r.width
     : 0);
-  els.timelineCursor.style.left = x + 'px';
+  els.tlPlayhead.style.left = x + 'px';
 }
 
 function renderTimeline() {
@@ -805,6 +862,7 @@ function renderEverything() {
   redrawOverlay();
   redrawPreviews();
   try { renderSfxTrack(); renderSfxList(); } catch (e) { /* step UI not ready */ }
+  try { renderIllTrack(); renderIllList(); } catch (e) { /* step UI not ready */ }
   try { renderTrimTrack(); renderTrimList(); } catch (e) { /* step UI not ready */ }
   try { renderWordChips(); } catch (e) { /* no transcript */ }
   try { updateRangeMeta(); } catch (e) { /* */ }
@@ -1811,6 +1869,7 @@ async function doDownload() {
     state.keyframes = { 1: [], 2: [] };
     state.currentTime = 0;
     state.words = [];
+    resetRenderResult();           // clear any previous clip's render output
     state.renderRange = { start: null, end: null };
     state.autoRange = { start: 0, end: res.duration };
     state.sfx = [];                // placements are per-clip
@@ -1855,6 +1914,122 @@ function renderWordChips() {
     .join('');
 }
 
+// ───────────────────────── transcript editor (step 8) ─────────────────────────
+// Editable transcript: fix mis-heard words (timing kept) or delete words. Edits
+// feed the render captions; persisted to the clip's jobs.transcript so the queue
+// render uses the EDITED words (it reads that cache instead of re-transcribing).
+function renderTranscriptEditor() {
+  const box = $('#transcript-editor');
+  if (!box) return;
+  if (!state.words.length) {
+    box.innerHTML = '<div class="muted">No transcript yet — hit Transcribe.</div>';
+    return;
+  }
+  box.innerHTML = state.words.map((w, i) =>
+    `<span class="tw-chip"><input class="tw-word" data-i="${i}" value="${escapeHtml(w.word)}" `
+    + `size="${Math.max(2, (w.word || '').length)}" title="${formatTime(w.start)}">`
+    + `<button class="tw-del" data-i="${i}" title="delete word">×</button></span>`
+  ).join('');
+  box.querySelectorAll('.tw-word').forEach(inp => {
+    inp.addEventListener('input', (e) => {
+      const i = +e.target.dataset.i;
+      if (state.words[i]) state.words[i].word = e.target.value;
+      e.target.size = Math.max(2, e.target.value.length);   // auto-grow
+      scheduleTranscriptSave();
+    });
+    // click a word → seek the Trim video to that word's time
+    inp.addEventListener('focus', (e) => {
+      const i = +e.target.dataset.i;
+      const v = els.trimVideo;
+      if (v && state.words[i]) { try { v.currentTime = state.words[i].start || 0; } catch (_) {} }
+    });
+  });
+  box.querySelectorAll('.tw-del').forEach(b => b.addEventListener('click', () => {
+    state.words.splice(+b.dataset.i, 1);
+    renderTranscriptEditor();
+    try { renderWordChips(); } catch (_) {}
+    scheduleTranscriptSave();
+  }));
+}
+
+let _trSaveTimer = null;
+function scheduleTranscriptSave() {
+  if (_trSaveTimer) clearTimeout(_trSaveTimer);
+  _trSaveTimer = setTimeout(saveTranscriptNow, 800);
+  setStatus('tr-edit-status', 'editing…', null);
+}
+// Save a pending (debounced) transcript edit RIGHT NOW — call before switching
+// clips so a fast switch doesn't drop the last edit.
+function flushTranscriptSave() {
+  if (_trSaveTimer) { clearTimeout(_trSaveTimer); _trSaveTimer = null; return saveTranscriptNow(); }
+}
+async function saveTranscriptNow() {
+  if (!state.activeQueueKey) { setStatus('tr-edit-status', 'Open a queue clip to save transcript edits.', 'err'); return; }
+  try {
+    await apiPost(`/api/queue/${state.activeQueueKey}/save`, { transcript: JSON.stringify(state.words || []) });
+    setStatus('tr-edit-status', 'Saved ✓ — used in the render captions.', 'ok');
+  } catch (e) { setStatus('tr-edit-status', 'Save failed: ' + e.message, 'err'); }
+}
+
+async function transcribeForEdit() {
+  if (!state.jobId) { setStatus('tr-edit-status', 'Open / download a clip first.', 'err'); return; }
+  const btn = $('#btn-tr-transcribe');
+  if (state.words.length && !confirm('Re-transcribe? This replaces the current (possibly edited) transcript.')) return;
+  if (btn) btn.disabled = true;
+  setStatus('tr-edit-status', 'Transcribing (Whisper · first run loads the model)…');
+  try {
+    const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
+    state.words = tr.words || [];
+    renderTranscriptEditor();
+    try { renderWordChips(); } catch (_) {}
+    saveTranscriptNow();
+  } catch (e) {
+    setStatus('tr-edit-status', 'Failed: ' + e.message, 'err');
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function clearTranscript() {
+  if (!state.words.length) return;
+  if (!confirm('Remove ALL words? The render will have no caption.')) return;
+  state.words = [];
+  renderTranscriptEditor();
+  try { renderWordChips(); } catch (_) {}
+  saveTranscriptNow();
+}
+
+let _trWired = false;
+let _trLastWord = -1;
+function initTranscriptStep() {
+  // Reuse the Trim step's own video as the transcript player (no second player).
+  const v = els.trimVideo;
+  if (v && !_trWired) {
+    _trWired = true;
+    v.addEventListener('timeupdate', highlightTranscriptWord);
+  }
+  renderTranscriptEditor();
+}
+
+// Light up the word being spoken as the Trim video plays + scroll it into view.
+function highlightTranscriptWord() {
+  const v = els.trimVideo; const box = $('#transcript-editor');
+  if (!v || !box || !state.words.length) return;
+  const t = v.currentTime || 0;
+  let idx = -1;
+  for (let i = 0; i < state.words.length; i++) {
+    const w = state.words[i];
+    const end = (w.end != null) ? w.end : (state.words[i + 1] ? state.words[i + 1].start : w.start + 0.4);
+    if (t >= w.start && t < end) { idx = i; break; }
+  }
+  if (idx === _trLastWord) return;
+  _trLastWord = idx;
+  const chips = box.querySelectorAll('.tw-chip');
+  chips.forEach(c => c.classList.remove('playing'));
+  if (idx >= 0 && chips[idx]) {
+    chips[idx].classList.add('playing');
+    chips[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1891,6 +2066,19 @@ function fillResult(result, withCaption) {
       ? `Caption burned in. File: ${result.filename}`
       : `No caption (quick preview). File: ${result.filename}`;
   }
+}
+
+// Clear the Render step's result (preview video + download link) so a previous
+// clip's render doesn't show on the next clip. Called on every clip switch.
+function resetRenderResult() {
+  state.result = null;
+  const rr = $('#render-result'); if (rr) rr.classList.add('hidden');
+  const card = $('#result-card');
+  if (card) {
+    const v = card.querySelector('video'); if (v) v.removeAttribute('src');
+    const dl = card.querySelector('.result-dl'); if (dl) { dl.href = '#'; dl.removeAttribute('download'); }
+  }
+  setStatus('rd-status', '');
 }
 
 function setResultLoading(loading) {
@@ -2106,11 +2294,130 @@ const thumb = {
 };
 function resetThumbSlots() {
   thumb.slots = [newThumbSlot(), newThumbSlot()];
+  // Headline is per-clip CONTENT — clear it (+ the textarea & generated ideas)
+  // so clip 2 doesn't inherit clip 1's title. Empty text falls back to the
+  // clip's own f-title at draw time. STYLE prefs (font/size/colour/layout/effect)
+  // are intentionally KEPT across clips.
+  thumb.text = '';
+  const ta = $('#thumb-text'); if (ta) ta.value = '';
+  const ideas = $('#thumb-ideas'); if (ideas) ideas.innerHTML = '';
   // New clip → the composed thumbnail no longer exists, so the intro must be
   // re-armed deliberately (transition/duration/voice prefs are kept).
   thumb.intro.enabled = false;
   const cb = $('#th-intro'); if (cb) cb.checked = false;
   if (typeof updateRenderIntroNote === 'function') updateRenderIntroNote();
+}
+
+// Serializable per-clip thumbnail settings (headline + style). Slots/snaps are
+// captured video frames and can't be persisted, so they're excluded.
+function thumbSettings() {
+  return {
+    text: thumb.text, font: thumb.font, size: thumb.size,
+    color: thumb.color, stroke: thumb.stroke, pos: thumb.pos,
+    upper: thumb.upper, shade: thumb.shade, layout: thumb.layout, effect: thumb.effect,
+    intro: { ...thumb.intro },   // intro card (transition incl. crumple + voice) — per clip
+    // slot metadata (NOT the canvas snapshot) — scene = capture time + crop rect
+    // (re-grabbed from the video on reopen); ill = the Pexels URL (re-loaded).
+    slots: (thumb.slots || []).map(s => ({
+      kind: s.kind, fit: s.fit, snapTime: s.snapTime, snapBox: s.snapBox,
+      illUrl: s.illUrl, illThumb: s.illThumb,
+    })),
+  };
+}
+
+// Apply saved settings back onto the thumb state + the UI inputs, then redraw.
+function applyThumbSettings(s) {
+  if (!s) return;
+  for (const k of ['text', 'font', 'size', 'color', 'stroke', 'pos', 'upper', 'shade', 'layout', 'effect']) {
+    if (s[k] !== undefined && s[k] !== null) thumb[k] = s[k];
+  }
+  const set = (id, v) => { const e = $(id); if (e && v != null) e.value = v; };
+  set('#thumb-text', thumb.text); set('#thumb-font', thumb.font); set('#thumb-size', thumb.size);
+  set('#thumb-color', thumb.color); set('#thumb-stroke', thumb.stroke);
+  set('#thumb-pos', thumb.pos); set('#thumb-effect', thumb.effect);
+  const up = $('#thumb-upper'); if (up) up.checked = !!thumb.upper;
+  const sh = $('#thumb-shade'); if (sh) sh.checked = !!thumb.shade;
+  // Restore the intro card config (transition incl. crumple, duration, voice, engine)
+  if (s.intro && typeof s.intro === 'object') {
+    thumb.intro = { ...thumb.intro, ...s.intro };
+    const ic = $('#th-intro'); if (ic) ic.checked = !!thumb.intro.enabled;
+    set('#th-intro-trans', thumb.intro.transition);
+    set('#th-intro-dur', thumb.intro.duration);
+    set('#th-intro-engine', thumb.intro.engine);
+    const iv = $('#th-intro-voice'); if (iv) iv.checked = !!thumb.intro.voice;
+    if (typeof updateRenderIntroNote === 'function') updateRenderIntroNote();
+  }
+  if (Array.isArray(s.slots) && s.slots.length) restoreThumbSlots(s.slots);
+  if (typeof renderThumbLayoutToggle === 'function') renderThumbLayoutToggle();
+  if (typeof renderThumbSlots === 'function') renderThumbSlots();
+  drawThumb();
+}
+
+// Rebuild the thumbnail slots from saved METADATA. Pexels picks reload from their
+// URL immediately; scene captures are re-grabbed from the video at their saved
+// time once the Thumbnail step's video is ready (restoreSceneCaptures).
+function restoreThumbSlots(saved) {
+  thumb.slots = saved.map(s => ({
+    kind: s.kind || 'scene', fit: s.fit || 'cover',
+    snap: null, snapBox: s.snapBox || null,
+    snapTime: (s.snapTime != null ? s.snapTime : null),
+    illImg: null, illUrl: s.illUrl || null, illThumb: s.illThumb || null,
+  }));
+  thumb.slots.forEach(s => {
+    if (s.kind === 'ill' && s.illUrl) {
+      const img = new Image();
+      img.onload = drawThumb;
+      img.src = '/api/img?url=' + encodeURIComponent(s.illUrl);
+      s.illImg = img;
+    }
+  });
+  restoreSceneCaptures();   // re-grab scene frames once the video is ready (no-op if none)
+}
+
+function _seekThumb(v, t) {
+  return new Promise(res => {
+    const h = () => { v.removeEventListener('seeked', h); res(); };
+    v.addEventListener('seeked', h);
+    try { v.currentTime = t; } catch (_) { res(); }
+    setTimeout(res, 2000);
+  });
+}
+
+// Re-capture scene slots from the thumb video at their saved time. Runs when the
+// video is loaded (called on restore + from the video's loadeddata). Sequential
+// seeks, then restores the playhead.
+async function restoreSceneCaptures() {
+  const v = els.thumbVideo;
+  if (!v) return;
+  const pend = thumb.slots
+    .map((s, i) => ({ s, i }))
+    .filter(({ s }) => s.kind === 'scene' && s.snapTime != null && !s.snap);
+  if (!pend.length || !v.videoWidth) return;   // video not ready → loadeddata retries
+  const origT = v.currentTime || 0;
+  for (const { s } of pend) {
+    await _seekThumb(v, s.snapTime);
+    if (!v.videoWidth) break;
+    const off = document.createElement('canvas');
+    off.width = v.videoWidth; off.height = v.videoHeight;
+    off.getContext('2d').drawImage(v, 0, 0);
+    s.snap = off;
+  }
+  try { v.currentTime = origT; } catch (_) {}
+  renderThumbSlots(); drawThumb();
+}
+
+// "Save" in the Headline section — persist this clip's thumbnail settings to its
+// queue job so they're restored on reopen. (Only queue clips have a DB row.)
+async function saveThumbToClip() {
+  if (!state.activeQueueKey) {
+    setStatus('thumb-gen-status', 'Open a clip from the queue first — then its thumbnail is remembered.', 'err');
+    return;
+  }
+  try {
+    await apiPost(`/api/queue/${state.activeQueueKey}/save`, { thumbnail: JSON.stringify(thumbSettings()) });
+    state.queueSig = queueSig();   // fold into the autosave baseline so it doesn't re-fire
+    setStatus('thumb-gen-status', 'Thumbnail saved ✓ — remembered for this clip.', 'ok');
+  } catch (e) { setStatus('thumb-gen-status', 'Save failed: ' + e.message, 'err'); }
 }
 
 function wireThumb() {
@@ -2124,7 +2431,7 @@ function wireThumb() {
     const d = $('#thumb-dur'); if (d) d.textContent = formatTime(v.duration || 0);
     drawThumb();
   });
-  v.addEventListener('loadeddata', drawThumb);
+  v.addEventListener('loadeddata', () => { drawThumb(); restoreSceneCaptures(); });
   v.addEventListener('seeked', drawThumb);
   v.addEventListener('timeupdate', () => {
     const t = $('#thumb-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
@@ -2157,6 +2464,9 @@ function wireThumb() {
     thumb.layout = b.dataset.layout;
     renderThumbLayoutToggle(); renderThumbSlots(); drawThumb();
   }));
+
+  const tsave = $('#btn-thumb-save');
+  if (tsave) tsave.addEventListener('click', saveThumbToClip);
 
   // intro card controls
   $('#th-intro').addEventListener('change', (e) => { thumb.intro.enabled = e.target.checked; updateRenderIntroNote(); });
@@ -2793,6 +3103,8 @@ function wireQueue() {
   }
   const all = $('#btn-queue-render-all');
   if (all) all.addEventListener('click', renderAllReady);
+  const rqAll = $('#btn-rq-all');
+  if (rqAll) rqAll.addEventListener('click', renderAllReady);
   const stop = $('#btn-queue-stop-box');
   if (stop) stop.addEventListener('click', stopBoxing);
   const rsel = $('#room-select');
@@ -2861,7 +3173,37 @@ async function refreshQueue() {
     if (!r.ok) return;
     const data = await r.json();
     renderQueueList(data.jobs || [], data.box_eta);
+    try { renderRenderQueue(data.jobs || []); } catch (_) { /* render-step list best-effort */ }
   } catch (e) { /* sidebar is best-effort */ }
+}
+
+// "All clips · render & download" list on the Render step — same data as the
+// sidebar, render-focused. Each clip renders with its OWN saved boxes/trim/sound/
+// transcript (per-clip columns), so nothing is ever mixed across clips.
+function renderRenderQueue(jobs) {
+  const ul = $('#render-queue-list');
+  if (!ul) return;
+  const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
+  const meta = $('#render-queue-meta');
+  if (meta) meta.textContent = `${c.done || 0} done · ${c.ready || 0} ready · ${(c.rendering || 0) + (c.render_queued || 0)} in render`;
+  ul.innerHTML = jobs.map(j => {
+    const active = j.key === state.activeQueueKey ? ' active' : '';
+    const canRender = j.status === 'ready' || j.status === 'done';
+    const statusCell = j.status === 'rendering'
+      ? `<span class="rq-prog">${escapeHtml(j.message || 'rendering…')}</span>`
+      : statusBadge(j.status);
+    const renderBtn = canRender
+      ? `<button class="rq-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'render this clip (background)'}">▶</button>` : '';
+    const dl = j.output_path
+      ? `<a class="rq-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>` : '';
+    return `<li class="rq-item${active}" data-status="${j.status}">
+      <span class="rq-id">${escapeHtml(j.id)}</span>
+      <span class="rq-title">${escapeHtml(j.title || '')}</span>
+      <span class="rq-status">${statusCell}</span>
+      <span class="rq-actions">${renderBtn}${dl}</span>
+    </li>`;
+  }).join('');
+  ul.querySelectorAll('.rq-render').forEach(b => b.addEventListener('click', () => renderQueueJob(b.dataset.key)));
 }
 
 async function stopBoxing() {
@@ -2962,7 +3304,10 @@ function renderQueueList(jobs, boxEta) {
     const renderBtn = canOpen
       ? `<button class="q-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'transcribe + render this clip (queued, runs in background)'}">▶</button>`
       : '';
-    const dl = (j.status === 'done' && j.output_path)
+    // Download stays available whenever a rendered file EXISTS (output_path set),
+    // not only while status==='done' — so re-opening or re-rendering a clip never
+    // makes the button vanish (you can still grab the previous render).
+    const dl = j.output_path
       ? `<a class="q-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>`
       : '';
     const retry = j.status === 'error' ? `<button class="q-retry" data-key="${j.key}" title="retry this job">↻</button>` : '';
@@ -2980,7 +3325,9 @@ function renderQueueList(jobs, boxEta) {
       <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${escapeHtml(j.message || '')}">
         <span class="q-id">${escapeHtml(j.id)}</span>
         <span class="q-title">${escapeHtml(j.title || '')}</span>
-        <span class="q-sub">${statusBadge(j.status)}${kf}${roomChip}${qc}</span>
+        <span class="q-sub">${j.status === 'rendering'
+            ? `<span class="q-prog">${escapeHtml(j.message || 'rendering…')}</span>`
+            : statusBadge(j.status)}${kf}${roomChip}${qc}</span>
       </button>
       ${dl}${rebox}${renderBtn}${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
@@ -3005,6 +3352,7 @@ async function skipBoxQueueJob(key) {
 }
 
 async function openQueueJob(key) {
+  await flushTranscriptSave();       // save any pending transcript edit on the OLD clip
   await autosaveQueue();             // flush edits on the previously-open job first
   let job;
   try {
@@ -3027,11 +3375,30 @@ async function openQueueJob(key) {
   };
   state.keyframes = { 1: job.box1 || [], 2: job.box2 || [] };
   state.currentTime = 0;
-  state.words = [];
-  state.sfx = [];                  // placements are per-clip
-  state.ills = [];                 // cutaways are per-clip
-  state.keep = []; state.keepA = null;  // keep-windows are per-clip
+  // Restore THIS clip's transcript (edited or cached) so the Transcript/Render
+  // steps show the right words — never the previous clip's.
+  state.words = (() => { try { return job.transcript ? JSON.parse(job.transcript) : []; } catch (_) { return []; } })();
+  try { renderWordChips(); renderTranscriptEditor(); } catch (_) {}
+  if (els.wordsBox) els.wordsBox.classList.toggle('hidden', !state.words.length);
+  resetRenderResult();   // clear the previous clip's render output/download from the Render step
+  state.keepA = null;
+  // Per-clip edits — RESTORE from the saved job (each step auto-saves), else empty.
+  const _parse = (s, fb) => { try { return s ? JSON.parse(s) : fb; } catch (_) { return fb; } };
+  state.sfx = _parse(job.sfx, []);                 // Sound step placements
+  state.ills = _parse(job.illustrations, []);      // Illustration cutaways
+  state.keep = _parse(job.keep_segments, []);      // Trim keep-windows
+  const _cap = _parse(job.caption, null);          // caption font/size
+  if (_cap && typeof _cap === 'object') {
+    if (_cap.font) state.caption.font = _cap.font;
+    if (_cap.size) state.caption.size = _cap.size;
+    if (els.capFont) els.capFont.value = state.caption.font;
+    if (els.capSize) els.capSize.value = state.caption.size;
+  }
   resetThumbSlots();               // thumbnail backgrounds reference the old clip
+  // Restore this clip's saved thumbnail (headline + style), if any.
+  if (job.thumbnail) {
+    try { applyThumbSettings(JSON.parse(job.thumbnail)); } catch (_) { /* ignore bad blob */ }
+  }
   state.renderRange = { start: null, end: null };
   state.autoRange = { start: 0, end: job.duration };
   // Reflect the job in the Step 1 form + prefill the auto-box prompts so a
@@ -3058,7 +3425,11 @@ async function openQueueJob(key) {
   updateRangeMeta();
   state.queueSig = queueSig();       // baseline so autosave only fires on real edits
   histReset();                       // start edit history fresh for this job
-  setStatus('queue-status', `Editing "${job.id}" — box edits auto-save.`, 'ok');
+  setStatus('queue-status', `Editing "${job.id}" — all steps auto-save.`, 'ok');
+  // Render the restored Sound / Illustration / Trim tracks so they're ready on those steps.
+  try { renderSfxTrack(); renderSfxList(); } catch (_) {}
+  try { renderIllTrack(); renderIllList(); } catch (_) {}
+  try { renderTrimTrack(); renderTrimList(); } catch (_) {}
   showStep(2);
   refreshQueue();                    // update the active highlight
 }
@@ -3071,6 +3442,8 @@ function queueSig() {
     ctx: ($('#ab-context') ? $('#ab-context').value : ''),
     p1: ($('#ab-prompt-1') ? $('#ab-prompt-1').value : ''),
     p2: ($('#ab-prompt-2') ? $('#ab-prompt-2').value : ''),
+    th: thumbSettings(),
+    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption,
   });
 }
 
@@ -3088,6 +3461,11 @@ async function autosaveQueue() {
       context: $('#ab-context') ? $('#ab-context').value : '',
       prompt1: $('#ab-prompt-1') ? $('#ab-prompt-1').value : '',
       prompt2: $('#ab-prompt-2') ? $('#ab-prompt-2').value : '',
+      thumbnail: JSON.stringify(thumbSettings()),
+      sfx: JSON.stringify(state.sfx || []),
+      illustrations: JSON.stringify(state.ills || []),
+      keep_segments: JSON.stringify(state.keep || []),
+      caption: JSON.stringify(state.caption || {}),
     });
     setStatus('queue-status', 'Progress saved ✓', 'ok');
   } catch (e) { /* try again next tick — keep the new sig so we don't spin */ }
@@ -3114,7 +3492,15 @@ async function retryQueueJob(key) {
 }
 
 async function renderQueueJob(key) {
-  if (state.activeQueueKey === key) await autosaveQueue();   // flush box edits first
+  if (state.activeQueueKey === key) {
+    await autosaveQueue();   // flush all edits (boxes / trim / sfx / thumbnail) first
+    // If this clip has an intro card enabled (e.g. crumple transition + sound),
+    // compose its thumbnail PNG now + upload so the background render can prepend it.
+    if (thumb.intro && thumb.intro.enabled && state.jobId) {
+      try { await prepareIntro(); }
+      catch (e) { setStatus('queue-status', 'Intro skipped: ' + e.message, 'err'); }
+    }
+  }
   try {
     await apiPost(`/api/queue/${key}/render`, {});
     setStatus('queue-status', 'Queued for render — transcribe + render runs in the background, one at a time.', 'ok');
@@ -3836,6 +4222,7 @@ function wireTrim() {
     const scr = $('#trim-scrubber'); if (scr) scr.max = v.duration || 0;
     const d = $('#trim-dur'); if (d) d.textContent = formatTime(v.duration || 0);
     renderTrimTrack();
+    reapplySpeed('trim');
   });
   v.addEventListener('timeupdate', () => {
     // During PLAYBACK, skip over the parts that the render will cut, so the
@@ -3981,9 +4368,10 @@ function renderTrimTrack() {
   track.innerHTML = state.keep.map((w, i) => {
     const left = (w.start / dur) * 100;
     const width = Math.max(1, ((w.end - w.start) / dur) * 100);
-    return `<div class="trim-block" data-i="${i}" style="left:${left}%;width:${width}%" title="${w.start.toFixed(1)}–${w.end.toFixed(1)}s — drag to move, right edge to resize">
+    return `<div class="trim-block" data-i="${i}" style="left:${left}%;width:${width}%" title="${w.start.toFixed(1)}–${w.end.toFixed(1)}s — drag to move, drag either edge to resize">
+      <span class="trim-block-handle l"></span>
       <span class="trim-block-lbl">${(w.end - w.start).toFixed(1)}s</span>
-      <span class="trim-block-handle"></span>
+      <span class="trim-block-handle r"></span>
     </div>`;
   }).join('') + '<div class="ill-cursor" id="trim-cursor"></div>';
   updateTrimCursor();
@@ -4002,9 +4390,16 @@ function onTrimTrackDown(e) {
   e.preventDefault();
   const i = +block.dataset.i;
   const rect = $('#trim-track').getBoundingClientRect();
-  const onHandle = e.target.classList.contains('trim-block-handle')
-    || (block.getBoundingClientRect().right - e.clientX) < 10;
-  state.keepDrag = { i, mode: onHandle ? 'resize' : 'move', startX: e.clientX, trackW: rect.width,
+  const br = block.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('trim-block-handle')) {
+    mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  } else if ((e.clientX - br.left) < 10) {
+    mode = 'resize-l';
+  } else if ((br.right - e.clientX) < 10) {
+    mode = 'resize-r';
+  }
+  state.keepDrag = { i, mode, startX: e.clientX, trackW: rect.width,
                      a: state.keep[i].start, b: state.keep[i].end };
 }
 
@@ -4019,7 +4414,10 @@ function onTrimDragMove(e) {
     const len = d.b - d.a;
     let ns = Math.max(0, Math.min(d.a + dt, dur - len));
     w.start = +ns.toFixed(2); w.end = +(ns + len).toFixed(2);
-  } else {
+  } else if (d.mode === 'resize-l') {
+    let ns = Math.max(0, Math.min(d.a + dt, w.end - TRIM_MIN));
+    w.start = +ns.toFixed(2);
+  } else {  // resize-r
     let ne = Math.max(w.start + TRIM_MIN, Math.min(d.b + dt, dur));
     w.end = +ne.toFixed(2);
   }

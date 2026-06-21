@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20260620b">
 </head>
 <body>
 <header class="topbar">
@@ -139,31 +139,52 @@
           <button class="ctrl-btn" id="btn-play" title="Play/Pause (Space)">▶</button>
           <button class="ctrl-btn small" id="btn-back-1" title="-1s (←)">«</button>
           <button class="ctrl-btn small" id="btn-fwd-1" title="+1s (→)">»</button>
+          <span class="speed-ctrl" data-vid="main" title="Playback speed">
+            <button class="speed-btn active" data-speed="1">1×</button>
+            <button class="speed-btn" data-speed="2">2×</button>
+            <button class="speed-btn" data-speed="3">3×</button>
+            <button class="speed-btn" data-speed="4">4×</button>
+          </span>
+          <span class="vc-spacer"></span>
           <span class="time-cur" id="time-cur">0:00.0</span>
-          <input type="range" id="scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+          <span class="vc-sep">/</span>
           <span class="time-dur" id="time-dur">0:00.0</span>
         </div>
 
-        <div class="timeline" id="timeline">
-          <div class="timeline-track" data-box="1">
-            <span class="timeline-label">Box 1</span>
-            <div class="timeline-dots" id="dots-1"></div>
-          </div>
-          <div class="timeline-track" data-box="2">
-            <span class="timeline-label">Box 2</span>
-            <div class="timeline-dots" id="dots-2"></div>
-          </div>
-          <div class="timeline-cursor" id="timeline-cursor"></div>
+        <div class="tl-zoombar">
+          <span class="tl-zoom-lbl">Timeline</span>
+          <button id="tl-zoom-out" class="cut-btn" title="Zoom out">−</button>
+          <span class="tl-zoom-val" id="tl-zoom-val">1×</span>
+          <button id="tl-zoom-in" class="cut-btn" title="Zoom in for precise trimming">+</button>
+          <button id="tl-zoom-reset" class="cut-btn" title="Fit to width">Fit</button>
         </div>
-
-        <div class="cut-lanes" id="cut-lanes">
-          <div class="cut-lane" data-box="1">
-            <span class="cut-lane-lbl">Box 1</span>
-            <div class="cut-lane-track" id="cuts-1"></div>
-          </div>
-          <div class="cut-lane" data-box="2">
-            <span class="cut-lane-lbl">Box 2</span>
-            <div class="cut-lane-track" id="cuts-2"></div>
+        <div class="tl-scroll" id="tl-scroll">
+          <div class="tl-inner" id="tl-inner">
+            <div class="timeline-track scrub-lane">
+              <span class="timeline-label">Play</span>
+              <input type="range" id="scrubber" class="scrubber tl-scrubber" min="0" max="100" step="0.05" value="0">
+            </div>
+            <div class="timeline" id="timeline">
+              <div class="timeline-track" data-box="1">
+                <span class="timeline-label">Box 1</span>
+                <div class="timeline-dots" id="dots-1"></div>
+              </div>
+              <div class="timeline-track" data-box="2">
+                <span class="timeline-label">Box 2</span>
+                <div class="timeline-dots" id="dots-2"></div>
+              </div>
+            </div>
+            <div class="cut-lanes" id="cut-lanes">
+              <div class="cut-lane" data-box="1">
+                <span class="cut-lane-lbl">Box 1</span>
+                <div class="cut-lane-track" id="cuts-1"></div>
+              </div>
+              <div class="cut-lane" data-box="2">
+                <span class="cut-lane-lbl">Box 2</span>
+                <div class="cut-lane-track" id="cuts-2"></div>
+              </div>
+            </div>
+            <div class="tl-playhead" id="tl-playhead"></div>
           </div>
         </div>
 
@@ -215,8 +236,8 @@
           </div>
           <div class="autobox-row ab-opts">
             <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
-            <label class="ab-check" title="Shot-director: shows the model a window of frames + the transcript so it decides layout, who is box1, and pans moving subjects — better on podcasts / reactions (slower: runs Whisper)"><input type="checkbox" id="ab-director"> Director</label>
-            <label class="ab-check" title="Speaker diarization (needs pyannote + HF token): adds a who-is-talking hint to the director"><input type="checkbox" id="ab-diarize"> Diarize</label>
+            <label class="ab-check" title="Shot-director: shows the model a window of frames + the transcript so it decides layout, who is box1, and pans moving subjects — better on podcasts / reactions (slower: runs Whisper)"><input type="checkbox" id="ab-director" checked> Director</label>
+            <label class="ab-check" title="Speaker diarization (needs pyannote + HF token): adds a who-is-talking hint to the director"><input type="checkbox" id="ab-diarize" checked> Diarize</label>
             <select id="ab-density" title="switch/motion timing precision — sampling is adaptive (dense only where the box actually changes), so Precise stays fast on static panels">
               <option value="1">Fast · 1s</option>
               <option value="0.8">Balanced · 0.8s</option>
@@ -362,6 +383,16 @@
         <span class="hint">Want to try another combo? Go back to Step 2, toggle the fit in each segment row, and render again. The output file in <code>output/</code> gets overwritten on every render — rename it manually if you want to keep it.</span>
       </div>
     </div>
+
+    <div class="render-queue" id="render-queue">
+      <div class="render-queue-head">
+        <h2>All clips · render &amp; download</h2>
+        <span class="render-queue-meta" id="render-queue-meta"></span>
+        <button id="btn-rq-all" class="ghost small" title="queue every ready clip for background render">▶ Render all ready</button>
+      </div>
+      <p class="hint">Each clip renders with ITS OWN boxes, trim, sound &amp; transcript — never mixed. Renders run in the background, one at a time.</p>
+      <ul class="render-queue-list" id="render-queue-list"></ul>
+    </div>
   </section>
 
   <!-- STEP 4: THUMBNAIL -->
@@ -409,6 +440,7 @@
                 <option value="serious">📋 Serius</option>
               </select>
             </label>
+            <button id="btn-thumb-save" class="ghost small" title="Remember this clip's headline + style (saved to the clip, restored when you reopen it)">Save</button>
           </div>
           <span class="status" id="thumb-gen-status"></span>
           <div class="thumb-ideas" id="thumb-ideas"></div>
@@ -628,6 +660,12 @@
         </div>
         <div class="trim-scrub">
           <button class="ctrl-btn" id="trim-play" title="Play/Pause">▶</button>
+          <span class="speed-ctrl" data-vid="trim" title="Playback speed">
+            <button class="speed-btn active" data-speed="1">1×</button>
+            <button class="speed-btn" data-speed="2">2×</button>
+            <button class="speed-btn" data-speed="3">3×</button>
+            <button class="speed-btn" data-speed="4">4×</button>
+          </span>
           <span class="time-cur" id="trim-time">0:00.0</span>
           <input type="range" id="trim-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
           <span class="time-dur" id="trim-dur">0:00.0</span>
@@ -643,15 +681,28 @@
       </div>
 
       <div class="trim-track-wrap">
-        <div class="sfx-sub-head">Kept windows — drag to move, right edge to resize · <span id="trim-kept">keeps whole clip</span></div>
+        <div class="sfx-sub-head">Kept windows — drag to move, drag either edge to resize · <span id="trim-kept">keeps whole clip</span></div>
         <div class="trim-track" id="trim-track" title="green = kept, dim = cut"></div>
       </div>
 
       <ol class="ill-list" id="trim-list"></ol>
     </div>
 
+    <div class="transcript-edit-block">
+      <div class="sfx-sub-head">Transcript — fix mis-heard words (click &amp; type) or delete · click a word to seek the video · the playing word lights up · used in the render captions</div>
+      <div class="trim-tr-actions">
+        <button id="btn-tr-transcribe" class="ghost small">Transcribe</button>
+        <button id="btn-tr-clear" class="ghost small" title="remove all words (render with no caption)">Clear all</button>
+        <span class="status" id="tr-edit-status"></span>
+      </div>
+      <div class="transcript-editor" id="transcript-editor">
+        <div class="muted">No transcript yet — hit Transcribe.</div>
+      </div>
+    </div>
+
     <div class="actions">
       <button class="ghost" data-go="6">← Back</button>
+      <button class="primary" data-go="3">Go to Render →</button>
     </div>
   </section>
 
@@ -659,6 +710,6 @@
 
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=20260620b"></script>
 </body>
 </html>

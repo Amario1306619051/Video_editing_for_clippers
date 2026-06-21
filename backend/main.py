@@ -45,6 +45,21 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="CLIPPER")
 
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    """Make the browser always revalidate the frontend (index.html/app.js/style.css)
+    so edits show up WITHOUT a manual hard-refresh. `no-cache` = use the cache only
+    after revalidating via ETag/Last-Modified (StaticFiles still sends those → a 304
+    when unchanged, fresh bytes when changed). API/media responses are left alone."""
+    resp = await call_next(request)
+    path = request.url.path
+    if not path.startswith(("/api/", "/temp/", "/output/")) and \
+       (path == "/" or path.endswith((".html", ".js", ".css"))):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
+
+
 # Start the batch-queue worker: it downloads + auto-boxes queued clips one at a
 # time in the background, resuming from the SQLite db queue/queue.db across restarts.
 batch_queue.start_worker()

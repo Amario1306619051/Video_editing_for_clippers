@@ -3,7 +3,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pexels
 import soundboard
@@ -18,17 +18,19 @@ _XFADE_OK = {"fade", "fadeblack", "fadewhite", "dissolve", "slideleft", "slideri
              "slideup", "slidedown", "circleopen", "circleclose", "zoomin",
              "wipeleft", "wiperight", "pixelize", "radial", "crumple"}
 
-# "Crumple paper" transition — a custom xfade `expr` (per-pixel A→B switch). The
-# frame is quantized into ~48px facets; each facet flips from the intro (A) to
-# the video (B) at a progress threshold built from a blocky pseudo-noise plus a
-# radial term, so the picture caves in from the edges toward the centre like a
-# sheet of paper being crushed into a ball. P is the 0→1 transition progress.
+# "Crumple paper" transition — a custom xfade `expr`. Each pixel reveals B over A
+# on a per-pixel threshold = blocky pseudo-noise (paper facets) + a radial term, so
+# the picture caves in from the edges toward the centre like a sheet being crushed.
+# Instead of a HARD flip (which pops blockily), it CROSSFADES over a soft `band` of
+# progress around the threshold → smooth reveal. ld(1)=threshold, ld(2)=mix 0..1.
+# P is the 0→1 transition progress.
 _CRUMPLE_EXPR = (
-    "if(gt("
-    "P*1.4-0.4,"
-    "mod(sin(floor(X/48)*12.9898+floor(Y/48)*78.233)*43758.5453,1)*0.55"
-    "+(1-hypot(X-W/2,Y-H/2)/hypot(W/2,H/2))*0.45"
-    "),B,A)"
+    "st(1,"
+    "mod(sin(floor(X/36)*12.9898+floor(Y/36)*78.233)*43758.5453,1)*0.5"
+    "+(1-hypot(X-W/2,Y-H/2)/hypot(W/2,H/2))*0.5"
+    ");"
+    "st(2,clip((P*1.8-0.5-ld(1))/0.16+0.5,0,1));"
+    "A*(1-ld(2))+B*ld(2)"
 )
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
@@ -518,6 +520,50 @@ def _blur_enable_expr(kfs: list[dict]) -> str:
     return _segment_enable_expr(kfs, lambda k: k["fit"] == "blur_pad" and not k["gap"])
 
 
+def _blur_bg_filters(out_w: int, out_h: int) -> str:
+    """Cover-fill + blur for a blur_pad background, computed on a 1/4-scale copy
+    (~16× fewer pixels than blurring at full slot res) then scaled back up.
+
+    `gblur` has no CUDA path, so a full-resolution blur is the single heaviest CPU
+    filter in the whole graph (and the graph has ~15-20 of them per clip). Blurring
+    a 1/4 copy then upscaling gives a visually ~identical soft background for a
+    fraction of the cost — the upscale interpolation does most of the smoothing,
+    so a small sigma is enough. Input = the already-cropped box; output = out_w×out_h.
+    DW:DH keep the slot aspect exactly (out_w/out_h are multiples of 4 here) so the
+    upscale is a straight stretch with no distortion."""
+    dw, dh = max(2, out_w // 4), max(2, out_h // 4)
+    return (
+        f"scale={dw}:{dh}:force_original_aspect_ratio=increase,crop={dw}:{dh},"
+        f"gblur=sigma=8:steps=1,scale={out_w}:{out_h},eq=brightness=-0.08"
+    )
+
+
+def _mask_keyframes_to_intervals(keyframes: list, intervals: list[tuple[float, float]]) -> list:
+    """Return a copy of `keyframes` where every segment that does NOT overlap any
+    of `intervals` is forced to a gap (cheap black).
+
+    Used for the full-frame overlay paths (b1full/b2full): they're only DISPLAYED
+    during those intervals (`overlay=enable=`), so the hidden segments don't need
+    the expensive cover/blur work — turning them into gaps makes the segmented crop
+    chain skip them entirely, with zero visual change. Conservative: a segment is
+    kept real if it overlaps ANY interval (no splitting), so a partially-shown
+    segment is never dropped."""
+    if not intervals:
+        return keyframes
+    kfs = sorted(keyframes, key=lambda kk: kk.t)
+    SENTINEL = 1e9
+    out = []
+    for i, k in enumerate(kfs):
+        t0 = float(k.t)
+        t1 = float(kfs[i + 1].t) if i + 1 < len(kfs) else SENTINEL
+        shown = any(a < t1 and t0 < b for (a, b) in intervals)  # interval overlap
+        if shown or bool(getattr(k, "gap", False)):
+            out.append(k)
+        else:
+            out.append(k.model_copy(update={"gap": True}))
+    return out
+
+
 def _layout_switch_intervals(kfs1: list[dict], kfs2: list[dict]) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """Find time intervals where ONLY one box is active (real, not gap).
 
@@ -659,7 +705,7 @@ def _crop_chain_segmented(input_label: str, kfs: list[dict],
         seg = f"{out_label}_seg{j}"
         if k["fit"] == "blur_pad":
             parts.append(f"[{splits[j]}]{crop},setsar=1,split=2[{seg}a][{seg}b]")
-            parts.append(f"[{seg}a]{cover_filters},gblur=sigma=30:steps=2,eq=brightness=-0.08[{seg}bg]")
+            parts.append(f"[{seg}a]{_blur_bg_filters(out_w, out_h)}[{seg}bg]")
             parts.append(f"[{seg}b]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[{seg}fg]")
             parts.append(f"[{seg}bg][{seg}fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{seg}]")
         else:
@@ -742,7 +788,7 @@ def _crop_chain(input_label: str, keyframes: list[Keyframe],
         parts.append(f"[{input_label}]{crop},{cover_filters},setsar=1[{inner}]")
     elif not has_cover:
         parts.append(f"[{input_label}]{crop},setsar=1,split=2[{out_label}_a][{out_label}_b]")
-        parts.append(f"[{out_label}_a]{cover_filters},gblur=sigma=30:steps=2,eq=brightness=-0.08[{out_label}_bg]")
+        parts.append(f"[{out_label}_a]{_blur_bg_filters(out_w, out_h)}[{out_label}_bg]")
         parts.append(f"[{out_label}_b]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[{out_label}_fg]")
         parts.append(f"[{out_label}_bg][{out_label}_fg]overlay=(W-w)/2:(H-h)/2[{inner}]")
     else:
@@ -752,7 +798,7 @@ def _crop_chain(input_label: str, keyframes: list[Keyframe],
         enable_expr = _blur_enable_expr(kfs)
         parts.append(f"[{input_label}]{crop},setsar=1,split=3[{out_label}_s1][{out_label}_s2][{out_label}_s3]")
         parts.append(f"[{out_label}_s1]{cover_filters}[{cov}]")
-        parts.append(f"[{out_label}_s2]{cover_filters},gblur=sigma=30:steps=2,eq=brightness=-0.08[{out_label}_bg]")
+        parts.append(f"[{out_label}_s2]{_blur_bg_filters(out_w, out_h)}[{out_label}_bg]")
         parts.append(f"[{out_label}_s3]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[{out_label}_fg]")
         parts.append(f"[{out_label}_bg][{out_label}_fg]overlay=(W-w)/2:(H-h)/2[{blr}]")
         parts.append(f"[{cov}][{blr}]overlay=enable='{enable_expr}'[{out_label}_o]")
@@ -823,13 +869,23 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
     trans = (intro.transition or "fade")
     if trans != "cut" and trans not in _XFADE_OK:
         trans = "fade"
-    xf = 0.0 if trans == "cut" else min(0.6, intro_dur * 0.5, main_dur * 0.5)
+    # crumple gets a longer window (more frames → smoother caving); others 0.6s.
+    xf_cap = 0.9 if trans == "crumple" else 0.6
+    xf = 0.0 if trans == "cut" else min(xf_cap, intro_dur * 0.5, main_dur * 0.5)
 
     inputs = ["-loop", "1", "-t", f"{intro_dur:.3f}", "-i", str(intro_png)]
     if voice_wav:
         inputs += ["-i", str(voice_wav)]
     inputs += ["-i", str(main_path)]
     main_idx = 2 if voice_wav else 1
+
+    # Paper-crumple SFX layered at the transition moment — only for the crumple wipe.
+    crumple_wav = FONTS_DIR.parent / "sfx" / "crumple.wav"
+    use_crumple_sfx = (trans == "crumple" and crumple_wav.exists())
+    crumple_idx = None
+    if use_crumple_sfx:
+        inputs += ["-i", str(crumple_wav)]
+        crumple_idx = main_idx + 1
 
     af = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
     p: list[str] = []
@@ -854,7 +910,13 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
         else:
             xv = f"[iv][mv]xfade=transition={trans}:duration={xf:.3f}:offset={off:.3f}[v]"
         p.append(xv)
-        p.append(f"[ia][ma]acrossfade=d={xf:.3f}[a]")
+        if use_crumple_sfx:
+            off_ms = int(off * 1000)
+            p.append(f"[ia][ma]acrossfade=d={xf:.3f}[axf]")
+            p.append(f"[{crumple_idx}:a]adelay={off_ms}|{off_ms},volume=0.55,{af}[csfx]")
+            p.append("[axf][csfx]amix=inputs=2:normalize=0:duration=first[a]")
+        else:
+            p.append(f"[ia][ma]acrossfade=d={xf:.3f}[a]")
 
     tmp_out = TEMP_DIR / f"{job_id}_final.mp4"
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -867,6 +929,43 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
         raise RuntimeError(f"intro pass failed:\n{proc.stderr}")
     tmp_out.replace(main_path)
     return main_path
+
+
+def _run_render(cmd: list[str], progress_cb: Optional[Callable[[float], None]], total_dur: float) -> None:
+    """Run the ffmpeg render. With a progress_cb, stream `-progress` so the caller
+    gets a 0..1 fraction live; otherwise a plain blocking run. Raises on non-zero
+    exit with the captured stderr (same contract as the old subprocess.run)."""
+    if not progress_cb or not total_dur or total_dur <= 0:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg render failed:\n{proc.stderr}")
+        return
+    # ffmpeg writes machine-readable progress blocks to stdout via `-progress pipe:1`.
+    pcmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats", cmd[-1]]
+    proc = subprocess.Popen(pcmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for line in proc.stdout:                       # blocks until each block flushes
+            line = line.strip()
+            # `out_time_us`/`out_time_ms` are BOTH microseconds in ffmpeg (historical
+            # quirk) → /1e6 = seconds of OUTPUT produced so far.
+            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                val = line.split("=", 1)[1].strip()
+                if val.isdigit():
+                    try:
+                        progress_cb(max(0.0, min(0.999, (int(val) / 1_000_000.0) / total_dur)))
+                    except Exception:  # noqa: BLE001 — progress must never break the render
+                        pass
+            elif line == "progress=end":
+                break
+    finally:
+        stderr = proc.stderr.read() if proc.stderr else ""
+        proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg render failed:\n{stderr}")
+    try:
+        progress_cb(1.0)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def render(
@@ -884,6 +983,7 @@ def render(
     illustrations: Optional[list[IllustrationPick]] = None,
     keep_segments: Optional[list[KeepSegment]] = None,
     intro: Optional[IntroConfig] = None,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> dict:
     if not box1 and not box2:
         raise ValueError("at least one of box1/box2 must be provided")
@@ -979,13 +1079,15 @@ def render(
         # black slot — but the user's intent is "treat this like single-box
         # mode for this stretch". (b1_only/b2_only computed above for captions.)
         if b1_only:
-            parts.extend(_crop_chain("0:v", box1, OUT_W, OUT_H, "b1full"))
+            # b1full is only displayed during b1_only — mask the rest to gaps so the
+            # full-res crop/blur work is skipped for segments that never show fullscreen.
+            parts.extend(_crop_chain("0:v", _mask_keyframes_to_intervals(box1, b1_only), OUT_W, OUT_H, "b1full"))
             parts.append(
                 f"[{last}][b1full]overlay=enable='{_enable_from_intervals(b1_only)}':shortest=1[sw1]"
             )
             last = "sw1"
         if b2_only:
-            parts.extend(_crop_chain("0:v", box2, OUT_W, OUT_H, "b2full"))
+            parts.extend(_crop_chain("0:v", _mask_keyframes_to_intervals(box2, b2_only), OUT_W, OUT_H, "b2full"))
             parts.append(
                 f"[{last}][b2full]overlay=enable='{_enable_from_intervals(b2_only)}':shortest=1[sw2]"
             )
@@ -1013,8 +1115,7 @@ def render(
             # contained image + blurred-cover pad filling the target rect
             parts.append(
                 f"[{in_idx}:v]split=2[ia{i}][ib{i}];"
-                f"[ia{i}]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                f"gblur=sigma=30:steps=2,eq=brightness=-0.08[ibg{i}];"
+                f"[ia{i}]{_blur_bg_filters(W, H)}[ibg{i}];"
                 f"[ib{i}]scale={W}:{H}:force_original_aspect_ratio=decrease,setsar=1[ifg{i}];"
                 f"[ibg{i}][ifg{i}]overlay=(W-w)/2:(H-h)/2[ill{i}]"
             )
@@ -1125,9 +1226,16 @@ def render(
         str(output_path),
     ]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg render failed:\n{proc.stderr}")
+    # Expected OUTPUT duration (for the live progress %): keep-trim sums the kept
+    # windows; else the sub-range; else the whole source.
+    if keep:
+        out_dur = sum(max(0.0, b - a) for a, b in keep)
+    elif re_ is not None:
+        out_dur = max(0.1, re_ - rs)
+    else:
+        out_dur = max(0.1, src_dur - rs)
+
+    _run_render(cmd, progress_cb, out_dur)
 
     try:
         ass_path.unlink()
