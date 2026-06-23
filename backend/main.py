@@ -130,12 +130,17 @@ def api_render(req: RenderRequest):
             words=req.words,
             caption_font=req.caption_font,
             caption_size=req.caption_size,
+            caption_style=req.caption_style,
+            caption_color=req.caption_color,
             render_start=req.render_start,
             render_end=req.render_end,
             sfx=req.sfx,
             illustrations=req.illustrations,
             keep_segments=req.keep_segments,
             intro=req.intro,
+            grow_segments=req.grow_segments,
+            zoom_segments=req.zoom_segments,
+            combo_segments=req.combo_segments,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -308,6 +313,23 @@ def api_queue_stop_boxing():
     """Stop the whole boxing run: every job still waiting to be boxed goes to
     ready (draw-manually). In-flight jobs finish; no new ones start."""
     return {"stopped": batch_queue.stop_boxing()}
+
+
+@app.post("/api/queue/stop-render")
+def api_queue_stop_render():
+    """Stop rendering: kill the in-flight render's ffmpeg + pull rendering/queued
+    renders back to ready. Each stays editable + re-renderable with ▶."""
+    return batch_queue.stop_render()
+
+
+@app.post("/api/queue/{key}/stop-render")
+def api_queue_stop_render_one(key: str):
+    """Stop/cancel render for ONE clip: kill its ffmpeg if it's the in-flight
+    render, or pull it out of the queue if it's only queued. Others keep going."""
+    r = batch_queue.stop_render_one(key)
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail="job is not rendering or queued for render")
+    return r
 
 
 @app.post("/api/queue/render-ready")

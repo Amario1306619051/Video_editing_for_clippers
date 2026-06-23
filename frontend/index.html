@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260620b">
+<link rel="stylesheet" href="style.css?v=20260623b">
 </head>
 <body>
 <header class="topbar">
@@ -71,6 +71,7 @@
       <div class="queue-progress-txt" id="queue-progress-txt"></div>
     </div>
     <button id="btn-queue-render-all" class="ghost small">▶ Render all ready</button>
+    <button id="btn-queue-stop-render" class="ghost small hidden" title="Stop rendering — kills the current render + pulls queued ones back to ready (re-render with ▶)">■ Stop render</button>
     <button id="btn-queue-stop-box" class="ghost small hidden" title="Stop the AI boxing run — clips still waiting become draw-manually so you can move on">■ Stop boxing</button>
     <span class="status" id="queue-status"></span>
     <ul class="queue-list" id="queue-list"></ul>
@@ -184,6 +185,20 @@
                 <div class="cut-lane-track" id="cuts-2"></div>
               </div>
             </div>
+            <div class="cut-lanes" id="grow-lanes">
+              <div class="cut-lane" data-grow="1">
+                <span class="cut-lane-lbl" title="Top slot grows taller (covers the top of Box 2) during these windows">Grow ↕</span>
+                <div class="cut-lane-track" id="grows"></div>
+              </div>
+              <div class="cut-lane" data-zoom="1">
+                <span class="cut-lane-lbl" title="Top slot (box 1) gradual push-in zoom — slowly zooms closer then holds during these windows">Zoom ⤢</span>
+                <div class="cut-lane-track" id="zooms"></div>
+              </div>
+              <div class="cut-lane" data-combo="1">
+                <span class="cut-lane-lbl" title="Top slot (box 1) GROW + ZOOM together — slot grows taller AND content zooms in, then both snap back at the window end">Grow+Zoom ⤢↕</span>
+                <div class="cut-lane-track" id="combos"></div>
+              </div>
+            </div>
             <div class="tl-playhead" id="tl-playhead"></div>
           </div>
         </div>
@@ -214,6 +229,58 @@
           <button class="cut-btn" id="btn-split-1">Split Box 1 here</button>
           <button class="cut-btn" id="btn-split-2">Split Box 2 here</button>
         </div>
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Grow the TOP slot taller here (bottom stays, top covers its edge):</span>
+          <button class="cut-btn" id="btn-grow-here">+ Grow here</button>
+          <label class="grow-ctl">size <select id="grow-frac">
+            <option value="0.40625">3.25/8</option>
+            <option value="0.4375" selected>3.5/8</option>
+            <option value="0.46875">3.75/8</option>
+            <option value="0.5">4/8</option>
+            <option value="0.5625">4.5/8</option>
+            <option value="0.625">5/8</option>
+          </select></label>
+          <label class="grow-ctl">ramp <input type="number" id="grow-ramp" value="1.2" min="0" max="3" step="0.1" style="width:52px"> s</label>
+        </div>
+        <ol class="ill-list" id="grow-list"></ol>
+
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Gradual push-in zoom on the TOP slot (box 1) here — slowly zooms closer, then holds:</span>
+          <button class="cut-btn" id="btn-zoom-here">+ Zoom here</button>
+          <label class="grow-ctl">zoom <select id="zoom-amt">
+            <option value="1.2">1.2×</option>
+            <option value="1.3">1.3×</option>
+            <option value="1.4" selected>1.4×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select></label>
+          <label class="grow-ctl">zoom-in <input type="number" id="zoom-in" value="1.5" min="0.1" max="20" step="0.1" style="width:56px"> s</label>
+        </div>
+        <ol class="ill-list" id="zoom-list"></ol>
+
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Grow + Zoom together on the TOP slot (box 1) here — slot grows taller AND content zooms in, then both snap back:</span>
+          <button class="cut-btn" id="btn-combo-here">+ Grow+Zoom here</button>
+          <label class="grow-ctl">zoom <select id="combo-zoom">
+            <option value="1.2">1.2×</option>
+            <option value="1.3">1.3×</option>
+            <option value="1.4" selected>1.4×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select></label>
+          <label class="grow-ctl">size <select id="combo-frac">
+            <option value="0.40625">3.25/8</option>
+            <option value="0.4375" selected>3.5/8</option>
+            <option value="0.46875">3.75/8</option>
+            <option value="0.5">4/8</option>
+            <option value="0.5625">4.5/8</option>
+            <option value="0.625">5/8</option>
+          </select></label>
+          <label class="grow-ctl">in <input type="number" id="combo-in" value="0.3" min="0.1" max="20" step="0.1" style="width:50px"> s</label>
+        </div>
+        <ol class="ill-list" id="combo-list"></ol>
 
         <div class="autobox">
           <div class="autobox-head">
@@ -342,6 +409,21 @@
             <span>Caption Size</span>
             <input type="number" id="cap-size" value="64" min="24" max="160">
           </label>
+          <label>
+            <span>Active word</span>
+            <select id="cap-style" title="How the currently-spoken word is emphasised">
+              <option value="color">Change text color</option>
+              <option value="highlight">Highlight box</option>
+            </select>
+          </label>
+          <label>
+            <span>Color</span>
+            <select id="cap-color" title="Emphasis color">
+              <option value="yellow">Yellow</option>
+              <option value="green">Green</option>
+              <option value="blue">Blue</option>
+            </select>
+          </label>
         </div>
 
         <div class="intro-controls">
@@ -389,6 +471,7 @@
         <h2>All clips · render &amp; download</h2>
         <span class="render-queue-meta" id="render-queue-meta"></span>
         <button id="btn-rq-all" class="ghost small" title="queue every ready clip for background render">▶ Render all ready</button>
+        <button id="btn-rq-stop" class="ghost small" title="stop the current render + pull queued ones back to ready">■ Stop render</button>
       </div>
       <p class="hint">Each clip renders with ITS OWN boxes, trim, sound &amp; transcript — never mixed. Renders run in the background, one at a time.</p>
       <ul class="render-queue-list" id="render-queue-list"></ul>
@@ -710,6 +793,6 @@
 
 </div>
 
-<script src="app.js?v=20260620b"></script>
+<script src="app.js?v=20260623b"></script>
 </body>
 </html>

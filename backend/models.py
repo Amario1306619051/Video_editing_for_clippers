@@ -147,6 +147,47 @@ class KeepSegment(BaseModel):
     end: float
 
 
+class GrowSegment(BaseModel):
+    """A time window where the TOP slot GROWS taller, covering the top edge of the
+    (unchanged) bottom slot — an emphasis effect. `top_frac` = the grown top-slot
+    height as a fraction of the 1920-frame (baseline 3/8 = 0.375; default 3.5/8 =
+    0.4375). `ramp` = ease-in/out seconds (0 = instant snap). Times are clip-relative.
+    The bottom box stays 5/8; only the top expands down over it. The top box's crop
+    (source bbox) is unchanged — it just refits into the taller slot."""
+    start: float
+    end: float
+    top_frac: float = 0.4375
+    ramp: float = 0.0
+
+
+class ZoomSegment(BaseModel):
+    """A time window where the TOP slot (box 1) does a gradual cinematic PUSH-IN
+    zoom: it eases from 1.0 up to `zoom` over `ramp` seconds, HOLDS at the peak for
+    the rest of the window, then returns to normal instantly. `zoom` = peak
+    magnification (1.4 = 140%). `ramp` = the zoom-in duration in seconds (how slow
+    the push is). Times are clip-relative, center-anchored. The source bbox is
+    unchanged — only the slot content is magnified + centered, so the framing stays
+    the same shape (it just slowly gets closer). (`bpm` is legacy from the old
+    beat-sync motion and is now ignored.)"""
+    start: float
+    end: float
+    zoom: float = 1.4
+    ramp: float = 1.5
+    bpm: float = 120.0
+
+
+class ComboSegment(BaseModel):
+    """A window that does GROW + ZOOM together on the TOP slot (box 1): the slot
+    grows taller to `top_frac` AND the content punches in to `zoom`, both easing in
+    over `ramp` then snapping back instantly at the window end. Expanded at render
+    into a GrowSegment + a ZoomSegment over the same window (they compose)."""
+    start: float
+    end: float
+    top_frac: float = 0.4375
+    zoom: float = 1.4
+    ramp: float = 1.5
+
+
 class SfxPlacement(BaseModel):
     """A soundboard sound placed onto the clip.
       - kind 'oneshot' — plays once starting at `t` (seconds, clip time).
@@ -178,6 +219,8 @@ class RenderRequest(BaseModel):
     words: list[Word] = Field(default_factory=list)
     caption_font: str = "Anton"
     caption_size: int = 64
+    caption_style: str = "color"     # active-word emphasis: 'color' (recolor) | 'highlight' (box)
+    caption_color: str = "yellow"    # yellow | green | blue
     cleanup: bool = False
     # Optional render sub-range (seconds from clip start). Lets the user trim
     # the already-downloaded source further without re-downloading.
@@ -193,6 +236,12 @@ class RenderRequest(BaseModel):
     keep_segments: list[KeepSegment] = Field(default_factory=list)
     # Optional intro card (thumbnail + voiceover + transition) prepended at render.
     intro: Optional[IntroConfig] = None
+    # Windows where the TOP slot grows taller (covering the top of the bottom slot).
+    grow_segments: list[GrowSegment] = Field(default_factory=list)
+    # Windows where the TOP slot does a smooth center punch-in zoom (auto-return).
+    zoom_segments: list[ZoomSegment] = Field(default_factory=list)
+    # Windows that combine grow + zoom on the TOP slot (expanded to both at render).
+    combo_segments: list[ComboSegment] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):
@@ -301,3 +350,6 @@ class QueueJobPatch(BaseModel):
     keep_segments: Optional[str] = None
     caption: Optional[str] = None
     transcript: Optional[str] = None   # edited transcript (JSON list of {word,start,end})
+    grow_segments: Optional[str] = None  # top-slot grow windows (JSON list)
+    zoom_segments: Optional[str] = None  # top-slot punch-in zoom windows (JSON list)
+    combo_segments: Optional[str] = None  # top-slot grow+zoom windows (JSON list)

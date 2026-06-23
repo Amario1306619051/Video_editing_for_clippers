@@ -42,10 +42,11 @@ from typing import Optional
 
 import autobox
 import downloader
+import render_remote
 import renderer
 import transcriber
 import vision
-from models import IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word
+from models import ComboSegment, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word, ZoomSegment
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +75,12 @@ CAPTION_SIZE = 64
 # status, so no two grab the same clip.
 DOWNLOAD_WORKERS = 2
 BOXING_WORKERS = 3
-RENDER_WORKERS = 2
+# With remote GPU boxes configured, run one render thread PER box so renders fan
+# out in parallel (each _render_one grabs a free box). Without remotes, keep it
+# low — local renders are CPU-heavy and must not pile up. Local fallback is gated
+# to one-at-a-time by _local_render_sem regardless.
+RENDER_WORKERS = max(2, render_remote.box_count()) if render_remote.enabled() else 2
+_local_render_sem = threading.Semaphore(1)   # at most 1 LOCAL render at a time
 
 # Statuses (download and boxing are now SEPARATE stages so they parallelize):
 #   pending → downloading → downloaded → predicting → ready   (auto, on import)
@@ -85,6 +91,8 @@ _TERMINAL = {"ready", "done", "error"}
 _lock = threading.RLock()       # serializes all DB access within the process
 _worker_started = False
 _wake = threading.Event()       # set to nudge the worker when new work arrives
+_stop_render = threading.Event()  # set by stop_render() to cancel the in-flight LOCAL render
+_canceled = set()                 # job keys the user stopped mid-render (remote or local)
 _box_started: dict = {}         # key → time a job entered the boxing stage
 _box_durations: list = []       # recent boxing wall-times (s), for the ETA estimate
 
@@ -97,7 +105,8 @@ _JOB_COLS = [
     "width", "height", "duration", "output_path", "filename",
     "qc_score", "qc_issues", "thumbnail",
     # per-clip edits from the Sound / Illustration / Trim / Render steps (JSON blobs)
-    "sfx", "illustrations", "keep_segments", "caption",
+    "sfx", "illustrations", "keep_segments", "caption", "grow_segments",
+    "zoom_segments", "combo_segments",
 ]
 
 
@@ -142,7 +151,7 @@ def _init_db() -> None:
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT,
             qc_score INTEGER, qc_issues TEXT, thumbnail TEXT,
-            sfx TEXT, illustrations TEXT, keep_segments TEXT, caption TEXT
+            sfx TEXT, illustrations TEXT, keep_segments TEXT, caption TEXT, grow_segments TEXT
         )''')
         # Migrations for DBs created before these columns existed.
         for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
@@ -160,6 +169,9 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN illustrations TEXT",
                     "ALTER TABLE jobs ADD COLUMN keep_segments TEXT",
                     "ALTER TABLE jobs ADD COLUMN caption TEXT",
+                    "ALTER TABLE jobs ADD COLUMN grow_segments TEXT",
+                    "ALTER TABLE jobs ADD COLUMN zoom_segments TEXT",
+                    "ALTER TABLE jobs ADD COLUMN combo_segments TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -442,7 +454,8 @@ def save_job(key: str, patch: dict) -> Optional[dict]:
     """Persist edits from the editor (title + keyframes). Only known fields."""
     allowed = {k: patch[k] for k in
                ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
-                "thumbnail", "sfx", "illustrations", "keep_segments", "caption", "transcript")
+                "thumbnail", "sfx", "illustrations", "keep_segments", "caption", "transcript",
+                "grow_segments", "zoom_segments", "combo_segments")
                if k in patch}
     if not allowed:
         return _find(key)
@@ -496,6 +509,63 @@ def stop_boxing() -> int:
             "message='boxing stopped — draw the boxes manually' "
             "WHERE status='downloaded'")
         return cur.rowcount
+
+
+def stop_render() -> dict:
+    """Stop rendering: kill the in-flight render's ffmpeg + pull every rendering /
+    render-queued job back to `ready` so nothing auto-starts. Each stays editable
+    and can be re-rendered with ▶."""
+    _stop_render.set()
+    killed = renderer.terminate_active()
+    # Cancel any in-flight REMOTE renders too (kill the box's ffmpeg) and flag every
+    # rendering job so its _render_one won't mark it done or fall back to local.
+    with _lock, _db() as conn:
+        rows = conn.execute("SELECT key, job_id FROM jobs WHERE status='rendering'").fetchall()
+    for r in rows:
+        _canceled.add(r["key"])
+        if render_remote.enabled() and r["job_id"]:
+            try:
+                render_remote.cancel(r["job_id"])
+            except Exception:  # noqa: BLE001
+                pass
+    with _lock, _db() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status='ready', message='render stopped' "
+            "WHERE status IN ('rendering','render_queued')")
+        reset = cur.rowcount
+    return {"killed": bool(killed), "reset": reset}
+
+
+def stop_render_one(key: str) -> dict:
+    """Stop/cancel render for ONE clip (the global stop_render hits everything).
+    Renders are serialized, so a 'rendering' job IS the active ffmpeg → kill it;
+    a 'render_queued' job hasn't started → just pull it out. Either way only THIS
+    clip goes back to `ready` (editable + re-renderable); other clips untouched."""
+    j = _find(key)
+    if not j:
+        return {"ok": False, "killed": False}
+    status = j.get("status")
+    if status not in ("rendering", "render_queued"):
+        return {"ok": False, "killed": False, "status": status}
+    killed = False
+    if status == "rendering":
+        # Flag it so _render_one doesn't mark it done / fall back to local.
+        _canceled.add(key)
+        job_id = j.get("job_id")
+        # Remote render → kill the box's ffmpeg (don't touch the local _stop_render,
+        # which would disturb a concurrent LOCAL render of a different clip). Only a
+        # render NOT on any box is local → kill the local ffmpeg.
+        if render_remote.enabled() and job_id and render_remote.cancel(job_id):
+            killed = True
+        else:
+            _stop_render.set()
+            killed = bool(renderer.terminate_active())
+    # NOTE for a queued (not-yet-started) job we just pull it out below.
+    with _lock, _db() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='ready', message='render stopped' "
+            "WHERE key=? AND status IN ('rendering','render_queued')", (key,))
+    return {"ok": True, "killed": killed, "status": status}
 
 
 def queue_render(key: str) -> Optional[dict]:
@@ -802,6 +872,7 @@ def _render_one(job: dict) -> None:
     a finished mp4 in output/. Runs in the SAME single worker thread, so only one
     render ever runs at a time (CPU/GPU-safe)."""
     key = job["key"]
+    _canceled.discard(key)   # clear any stale stop flag from a prior attempt
     if not job.get("job_id"):
         _update(key, status="error", message="not downloaded yet — can't render")
         return
@@ -833,6 +904,7 @@ def _render_one(job: dict) -> None:
         _update(key, status="error", message=f"transcribe failed: {e}")
         return
 
+    _stop_render.clear()   # fresh — only a stop AFTER this point cancels this render
     _update(key, status="rendering", message="rendering… 0%")
     # Live render progress → job message ("rendering… NN%"). Throttled so we don't
     # hammer SQLite: persist only when the integer % changes AND ≥0.7s elapsed.
@@ -855,11 +927,16 @@ def _render_one(job: dict) -> None:
         except Exception:  # noqa: BLE001
             return default
     keep = [KeepSegment(**k) for k in _pj(job.get("keep_segments"), []) if isinstance(k, dict)]
+    grow = [GrowSegment(**g) for g in _pj(job.get("grow_segments"), []) if isinstance(g, dict)]
+    zoom = [ZoomSegment(**z) for z in _pj(job.get("zoom_segments"), []) if isinstance(z, dict)]
+    combo = [ComboSegment(**c) for c in _pj(job.get("combo_segments"), []) if isinstance(c, dict)]
     sfx = [SfxPlacement(**s) for s in _pj(job.get("sfx"), []) if isinstance(s, dict)]
     ills = [IllustrationPick(**c) for c in _pj(job.get("illustrations"), []) if isinstance(c, dict)]
     cap = _pj(job.get("caption"), {}) or {}
     cap_font = cap.get("font") or CAPTION_FONT
     cap_size = int(cap.get("size") or CAPTION_SIZE)
+    cap_style = cap.get("style") or "color"     # 'color' | 'highlight'
+    cap_color = cap.get("color") or "yellow"    # yellow | green | blue
     # Intro card (lives inside the saved thumbnail config). When enabled, the
     # frontend uploaded temp/{job}_intro.png on ▶; _prepend_intro applies the
     # transition (incl. crumple + its SFX) and is a no-op if the PNG is missing.
@@ -874,22 +951,82 @@ def _render_one(job: dict) -> None:
             voice=bool(intro_cfg.get("voice", True)),
             engine=intro_cfg.get("engine") or "gtts",
         )
-    try:
-        kf1 = [Keyframe(**k) for k in b1] or None
-        kf2 = [Keyframe(**k) for k in b2] or None
-        out = renderer.render(
-            job_id=job["job_id"], source_path=src, title=job.get("title") or "clip",
-            box1=kf1, box2=kf2, words=words,
-            caption_font=cap_font, caption_size=cap_size,
-            keep_segments=keep or None, sfx=sfx or None, illustrations=ills or None,
-            intro=intro,
-            progress_cb=_on_progress,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("queue render failed (%s): %s", job["id"], e)
-        _update(key, status="error", message=f"render failed: {e}")
-        return
+    title = job.get("title") or "clip"
+    filename = f"{renderer._slugify(title)}_{job['job_id']}.mp4"
 
+    # OFFLOAD to a remote GPU box when one is configured + free → renders fan out in
+    # parallel across the boxes. SFX needs the soundboard audio files (only on this
+    # box), so SFX clips always render locally. A remote miss (all boxes busy/down/
+    # errored) returns None and falls through to the local render below.
+    if render_remote.enabled() and not sfx:
+        params = {
+            "title": title,
+            "box1": b1 or None,
+            "box2": b2 or None,
+            "words": raw,                       # [{word,start,end}] dicts
+            "caption_font": cap_font,
+            "caption_size": cap_size,
+            "caption_style": cap_style,
+            "caption_color": cap_color,
+            "keep_segments": [k.model_dump() for k in keep],
+            "grow_segments": [g.model_dump() for g in grow],
+            "zoom_segments": [z.model_dump() for z in zoom],
+            "combo_segments": [c.model_dump() for c in combo],
+            "illustrations": [c.model_dump() for c in ills],
+            "intro": intro.model_dump() if intro else None,
+        }
+        intro_png = (renderer.TEMP_DIR / f"{job['job_id']}_intro.png") if intro else None
+        _update(key, message="rendering on a GPU box… 0%")
+        try:
+            remote = render_remote.render(job["job_id"], src, params, renderer.OUTPUT_DIR,
+                                          filename, intro_png=intro_png,
+                                          progress_cb=lambda pct: _on_progress(pct / 100.0))
+        except Exception as e:  # noqa: BLE001 — never let a dispatch error kill the render
+            log.warning("remote dispatch error (%s): %s", job["id"], e)
+            remote = None
+        if remote:
+            _canceled.discard(key)
+            _update(key, status="done", output_path=remote["output_path"],
+                    filename=remote["filename"],
+                    message=f"done — {remote['filename']} · {remote.get('box', 'remote')}")
+            return
+        if key in _canceled:        # user stopped it mid-remote-render (box ffmpeg killed)
+            _canceled.discard(key)
+            _update(key, status="ready", message="render stopped")
+            return
+
+    # LOCAL render (remote disabled / all boxes busy / sfx present). Gated to one at
+    # a time so a fallback can't run several heavy renders on this box concurrently.
+    with _local_render_sem:
+        if _stop_render.is_set() or key in _canceled:
+            _stop_render.clear()
+            _canceled.discard(key)
+            _update(key, status="ready", message="render stopped")
+            return
+        try:
+            kf1 = [Keyframe(**k) for k in b1] or None
+            kf2 = [Keyframe(**k) for k in b2] or None
+            out = renderer.render(
+                job_id=job["job_id"], source_path=src, title=title,
+                box1=kf1, box2=kf2, words=words,
+                caption_font=cap_font, caption_size=cap_size,
+                caption_style=cap_style, caption_color=cap_color,
+                keep_segments=keep or None, sfx=sfx or None, illustrations=ills or None,
+                intro=intro, grow_segments=grow or None, zoom_segments=zoom or None,
+                combo_segments=combo or None,
+                progress_cb=_on_progress,
+            )
+        except Exception as e:  # noqa: BLE001
+            if _stop_render.is_set() or key in _canceled:   # ffmpeg killed by a stop → not a failure
+                _stop_render.clear()
+                _canceled.discard(key)
+                _update(key, status="ready", message="render stopped")
+                return
+            log.warning("queue render failed (%s): %s", job["id"], e)
+            _update(key, status="error", message=f"render failed: {e}")
+            return
+
+    _canceled.discard(key)
     _update(key, status="done", output_path=out["output_path"], filename=out["filename"],
             message=f"done — {out['filename']}")
 

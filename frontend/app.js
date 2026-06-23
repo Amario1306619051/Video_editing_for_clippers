@@ -30,8 +30,14 @@ const state = {
   activeBox: null,          // null = canvas inactive ; 1 or 2 = active draw target
   currentTime: 0,
   tlZoom: 1,                              // Position-step timeline horizontal zoom (1 = fit width)
+  grow: [],                               // top-slot grow windows [{start,end,top_frac,ramp}]
+  growDrag: null,
+  zoom: [],                               // top-slot punch-in zoom windows [{start,end,zoom,ramp}]
+  zoomDrag: null,
+  combo: [],                              // top-slot grow+zoom combo windows [{start,end,top_frac,zoom,ramp}]
+  comboDrag: null,
   words: [],
-  caption: { font: 'Anton', size: 64 },  // must match the default <option> in index.html
+  caption: { font: 'Anton', size: 64, style: 'color', color: 'yellow' },  // must match the default <option> in index.html
   renderRange: { start: null, end: null },  // sub-range in seconds, null = open
   drag: null,
   abDrag: null,                          // 'start' | 'end' while dragging a range handle
@@ -70,6 +76,8 @@ document.addEventListener('DOMContentLoaded', () => {
   els.wordsBox = $('#words-box');
   els.capFont = $('#cap-font');
   els.capSize = $('#cap-size');
+  els.capStyle = $('#cap-style');
+  els.capColor = $('#cap-color');
   els.dots1 = $('#dots-1');
   els.dots2 = $('#dots-2');
   els.cuts1 = $('#cuts-1');
@@ -188,6 +196,36 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('mouseup', () => {
     if (state.cutDrag) { state.cutDrag = null; renderTimeline(); redrawOverlay(); redrawPreviews(); }
   });
+  // Top-slot grow lane
+  els.grows = $('#grows');
+  if (els.grows) els.grows.addEventListener('mousedown', onGrowBarDown);
+  if (els.grows) els.grows.addEventListener('dblclick', (e) => {
+    const bar = e.target.closest('.grow-bar'); if (!bar) return;
+    state.grow.splice(+bar.dataset.i, 1); renderGrowLane(); renderGrowList(); growChanged();
+  });
+  $('#btn-grow-here') && $('#btn-grow-here').addEventListener('click', addGrowHere);
+  window.addEventListener('mousemove', onGrowDragMove);
+  window.addEventListener('mouseup', () => { if (state.growDrag) { state.growDrag = null; renderGrowList(); growChanged(); } });
+  // Top-slot zoom lane
+  els.zooms = $('#zooms');
+  if (els.zooms) els.zooms.addEventListener('mousedown', onZoomBarDown);
+  if (els.zooms) els.zooms.addEventListener('dblclick', (e) => {
+    const bar = e.target.closest('.zoom-bar'); if (!bar) return;
+    state.zoom.splice(+bar.dataset.i, 1); renderZoomLane(); renderZoomList(); zoomChanged();
+  });
+  $('#btn-zoom-here') && $('#btn-zoom-here').addEventListener('click', addZoomHere);
+  window.addEventListener('mousemove', onZoomDragMove);
+  window.addEventListener('mouseup', () => { if (state.zoomDrag) { state.zoomDrag = null; renderZoomList(); zoomChanged(); } });
+  // Top-slot grow+zoom combo lane
+  els.combos = $('#combos');
+  if (els.combos) els.combos.addEventListener('mousedown', onComboBarDown);
+  if (els.combos) els.combos.addEventListener('dblclick', (e) => {
+    const bar = e.target.closest('.combo-bar'); if (!bar) return;
+    state.combo.splice(+bar.dataset.i, 1); renderComboLane(); renderComboList(); comboChanged();
+  });
+  $('#btn-combo-here') && $('#btn-combo-here').addEventListener('click', addComboHere);
+  window.addEventListener('mousemove', onComboDragMove);
+  window.addEventListener('mouseup', () => { if (state.comboDrag) { state.comboDrag = null; renderComboList(); comboChanged(); } });
 
   // Global undo/redo
   const undoBtn = document.getElementById('btn-undo');
@@ -262,8 +300,16 @@ document.addEventListener('DOMContentLoaded', () => {
     redrawPreview(els.preview2);
   });
   els.capSize.addEventListener('input', () => {
-    state.caption.size = +els.capSize.value || 64;
+    state.caption.size = Math.min(160, Math.max(24, +els.capSize.value || 64));  // never tiny → no speck captions
     redrawPreview(els.preview2);
+  });
+  els.capStyle && els.capStyle.addEventListener('change', () => {
+    state.caption.style = els.capStyle.value;
+    try { autosaveQueue(); } catch (_) {}
+  });
+  els.capColor && els.capColor.addEventListener('change', () => {
+    state.caption.color = els.capColor.value;
+    try { autosaveQueue(); } catch (_) {}
   });
 
   wireThumb();
@@ -777,6 +823,12 @@ function renderTimeline() {
   renderTrack(els.dots1, 1);
   renderTrack(els.dots2, 2);
   renderCutLanes();
+  renderGrowLane();
+  renderGrowList();
+  renderZoomLane();
+  renderZoomList();
+  renderComboLane();
+  renderComboList();
   els.kfCount1.textContent = state.keyframes[1].length + ' kf';
   els.kfCount2.textContent = state.keyframes[2].length + ' kf';
   updateTimelineCursor();
@@ -909,6 +961,340 @@ function renderCutLanes() {
     });
     host.innerHTML = bars.join('') || '<span class="cut-lane-empty">— no boxes —</span>';
   }
+}
+
+// ───────────────────────── top-slot grow lane (Position step) ─────────────────
+// Windows where the TOP slot grows taller (3/8 → top_frac), covering the top of
+// the (unchanged) bottom box. state.grow = [{start,end,top_frac,ramp}].
+const GROW_MIN = 0.2;
+
+function renderGrowLane() {
+  const host = els.grows || $('#grows');
+  if (!host || !state.source) return;
+  const dur = state.source.duration || 1;
+  host.innerHTML = (state.grow || []).map((g, i) => {
+    const left = (g.start / dur) * 100;
+    const width = Math.max(0.8, ((g.end - g.start) / dur) * 100);
+    const eighths = (g.top_frac * 8).toFixed(2).replace(/\.?0+$/, '');
+    return `<div class="grow-bar" data-i="${i}" style="left:${left}%;width:${width}%" `
+      + `title="grow to ${eighths}/8 · ramp ${g.ramp || 0}s · ${g.start.toFixed(1)}–${g.end.toFixed(1)}s — drag to move, edges to resize, double-click to delete">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">↕${eighths}/8</span><span class="cut-bar-h r"></span></div>`;
+  }).join('') || '<span class="cut-lane-empty">— no grow windows —</span>';
+}
+
+function renderGrowList() {
+  const ol = $('#grow-list');
+  if (!ol) return;
+  if (!state.grow || !state.grow.length) { ol.innerHTML = ''; return; }
+  ol.innerHTML = state.grow.map((g, i) =>
+    `<li class="ill-row"><span class="ill-row-t">${g.start.toFixed(1)}→${g.end.toFixed(1)}s</span>`
+    + `<label>size <select class="grow-row-frac" data-i="${i}">`
+    + ['0.40625:3.25', '0.4375:3.5', '0.46875:3.75', '0.5:4', '0.5625:4.5', '0.625:5']
+        .map(o => { const [v, lbl] = o.split(':'); return `<option value="${v}"${Math.abs(+v - g.top_frac) < 1e-4 ? ' selected' : ''}>${lbl}/8</option>`; }).join('')
+    + `</select></label>`
+    + `<label>ramp <input class="grow-row-ramp" data-i="${i}" type="number" min="0" max="3" step="0.1" value="${g.ramp || 0}" style="width:48px"> s</label>`
+    + `<button class="ill-del grow-row-del" data-i="${i}" title="delete">×</button></li>`
+  ).join('');
+  ol.querySelectorAll('.grow-row-frac').forEach(s => s.addEventListener('change', e => {
+    state.grow[+e.target.dataset.i].top_frac = +e.target.value; renderGrowLane(); growChanged();
+  }));
+  ol.querySelectorAll('.grow-row-ramp').forEach(s => s.addEventListener('input', e => {
+    state.grow[+e.target.dataset.i].ramp = Math.max(0, +e.target.value || 0); renderGrowLane(); growChanged();
+  }));
+  ol.querySelectorAll('.grow-row-del').forEach(b => b.addEventListener('click', () => {
+    state.grow.splice(+b.dataset.i, 1); renderGrowLane(); renderGrowList(); growChanged();
+  }));
+}
+
+function growChanged() {        // redraw preview + persist (queueSig includes grow)
+  try { redrawPreviews(); } catch (_) {}
+  try { autosaveQueue(); } catch (_) {}
+}
+
+function addGrowHere() {
+  if (!state.source) return;
+  const dur = state.source.duration || 0;
+  const a = state.currentTime || 0;
+  const b = Math.min(a + 2.0, dur);
+  if (b - a < GROW_MIN) { setStatus('tr-status', 'Move the playhead earlier — not enough room.', 'err'); return; }
+  const frac = +($('#grow-frac') ? $('#grow-frac').value : 0.4375) || 0.4375;
+  const ramp = Math.max(0, +($('#grow-ramp') ? $('#grow-ramp').value : 0.3) || 0);
+  state.grow = state.grow || [];
+  state.grow.push({ start: +a.toFixed(2), end: +b.toFixed(2), top_frac: frac, ramp });
+  state.grow.sort((x, y) => x.start - y.start);
+  renderGrowLane(); renderGrowList(); growChanged();
+}
+
+function onGrowBarDown(e) {
+  const bar = e.target.closest('.grow-bar');
+  if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i;
+  const rect = (els.grows || $('#grows')).getBoundingClientRect();
+  const br = bar.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('cut-bar-h')) mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  else if ((e.clientX - br.left) < 10) mode = 'resize-l';
+  else if ((br.right - e.clientX) < 10) mode = 'resize-r';
+  state.growDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: state.grow[i].start, b: state.grow[i].end };
+}
+
+function onGrowDragMove(e) {
+  const d = state.growDrag;
+  if (!d) return;
+  const dur = (state.source && state.source.duration) || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const g = state.grow[d.i];
+  if (!g) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    g.start = +ns.toFixed(2); g.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    g.start = +Math.max(0, Math.min(d.a + dt, g.end - GROW_MIN)).toFixed(2);
+  } else {
+    g.end = +Math.max(g.start + GROW_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderGrowLane();
+}
+
+// top-slot fraction at time t (for the live preview); stepped-ramp approximated linearly.
+function growHeightFracAt(t) {
+  // smooth (smoothstep) ease in/out — mirrors the renderer's _grow_height_expr.
+  const base = 3 / 8;
+  let frac = base;
+  for (const g of [...(state.grow || []), ...(state.combo || [])]) {   // combo also grows
+    if (t < g.start || t >= g.end) continue;
+    const target = g.top_frac || base;
+    if (target <= base) continue;
+    const span = g.end - g.start;
+    let r = +g.ramp || 0; if (r <= 0) r = Math.min(1.0, span * 0.4);   // "in" = speed knob
+    r = Math.max(0.12, Math.min(span * 0.9, r));
+    let k = Math.max(0, Math.min(1, (t - g.start) / r));   // ease-in only; snaps back at window end
+    k = 1 - Math.pow(1 - k, 3);                            // ease-out cubic (snappy start)
+    frac = Math.max(frac, base + (target - base) * k);
+  }
+  return frac;
+}
+
+// ───────────────────────── top-slot zoom lane (Position step) ─────────────────
+// Windows where the TOP slot does a smooth center punch-in zoom and returns to
+// normal within the window. state.zoom = [{start,end,zoom,ramp}].
+const ZOOM_MIN = 0.2;
+const ZOOM_OPTS = ['1.1', '1.2', '1.3', '1.5', '1.75', '2'];
+
+function renderZoomLane() {
+  const host = els.zooms || $('#zooms');
+  if (!host || !state.source) return;
+  const dur = state.source.duration || 1;
+  host.innerHTML = (state.zoom || []).map((z, i) => {
+    const left = (z.start / dur) * 100;
+    const width = Math.max(0.8, ((z.end - z.start) / dur) * 100);
+    const zf = (+z.zoom || 1.4).toFixed(2).replace(/\.?0+$/, '');
+    const inS = (+z.ramp || 1.5).toFixed(1).replace(/\.0$/, '');
+    return `<div class="zoom-bar" data-i="${i}" style="left:${left}%;width:${width}%" `
+      + `title="push-in to ${zf}× over ${inS}s, then hold · ${z.start.toFixed(1)}–${z.end.toFixed(1)}s — drag to move, edges to resize, double-click to delete">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">⤢${zf}× ${inS}s</span><span class="cut-bar-h r"></span></div>`;
+  }).join('') || '<span class="cut-lane-empty">— no zoom windows —</span>';
+}
+
+function renderZoomList() {
+  const ol = $('#zoom-list');
+  if (!ol) return;
+  if (!state.zoom || !state.zoom.length) { ol.innerHTML = ''; return; }
+  ol.innerHTML = state.zoom.map((z, i) =>
+    `<li class="ill-row"><span class="ill-row-t">${z.start.toFixed(1)}→${z.end.toFixed(1)}s</span>`
+    + `<label>zoom <select class="zoom-row-amt" data-i="${i}">`
+    + ZOOM_OPTS.map(v => `<option value="${v}"${Math.abs(+v - (+z.zoom || 1.4)) < 1e-4 ? ' selected' : ''}>${v}×</option>`).join('')
+    + `</select></label>`
+    + `<label>zoom-in <input class="zoom-row-in" data-i="${i}" type="number" min="0.1" max="20" step="0.1" value="${(+z.ramp || 1.5)}" style="width:52px"> s</label>`
+    + `<button class="ill-del zoom-row-del" data-i="${i}" title="delete">×</button></li>`
+  ).join('');
+  ol.querySelectorAll('.zoom-row-amt').forEach(s => s.addEventListener('change', e => {
+    state.zoom[+e.target.dataset.i].zoom = +e.target.value; renderZoomLane(); zoomChanged();
+  }));
+  ol.querySelectorAll('.zoom-row-in').forEach(s => s.addEventListener('input', e => {
+    state.zoom[+e.target.dataset.i].ramp = Math.max(0.1, +e.target.value || 1.5); renderZoomLane(); zoomChanged();
+  }));
+  ol.querySelectorAll('.zoom-row-del').forEach(b => b.addEventListener('click', () => {
+    state.zoom.splice(+b.dataset.i, 1); renderZoomLane(); renderZoomList(); zoomChanged();
+  }));
+}
+
+function zoomChanged() {         // redraw preview + persist (queueSig includes zoom)
+  try { redrawPreviews(); } catch (_) {}
+  try { autosaveQueue(); } catch (_) {}
+}
+
+function addZoomHere() {
+  if (!state.source) return;
+  const dur = state.source.duration || 0;
+  const a = state.currentTime || 0;
+  const b = Math.min(a + 2.0, dur);
+  if (b - a < ZOOM_MIN) { setStatus('tr-status', 'Move the playhead earlier — not enough room.', 'err'); return; }
+  const amt = +($('#zoom-amt') ? $('#zoom-amt').value : 1.4) || 1.4;
+  const zin = Math.max(0.1, +($('#zoom-in') ? $('#zoom-in').value : 1.5) || 1.5);
+  state.zoom = state.zoom || [];
+  state.zoom.push({ start: +a.toFixed(2), end: +b.toFixed(2), zoom: amt, ramp: zin });
+  state.zoom.sort((x, y) => x.start - y.start);
+  renderZoomLane(); renderZoomList(); zoomChanged();
+}
+
+function onZoomBarDown(e) {
+  const bar = e.target.closest('.zoom-bar');
+  if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i;
+  const rect = (els.zooms || $('#zooms')).getBoundingClientRect();
+  const br = bar.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('cut-bar-h')) mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  else if ((e.clientX - br.left) < 10) mode = 'resize-l';
+  else if ((br.right - e.clientX) < 10) mode = 'resize-r';
+  state.zoomDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: state.zoom[i].start, b: state.zoom[i].end };
+}
+
+function onZoomDragMove(e) {
+  const d = state.zoomDrag;
+  if (!d) return;
+  const dur = (state.source && state.source.duration) || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const z = state.zoom[d.i];
+  if (!z) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    z.start = +ns.toFixed(2); z.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    z.start = +Math.max(0, Math.min(d.a + dt, z.end - ZOOM_MIN)).toFixed(2);
+  } else {
+    z.end = +Math.max(z.start + ZOOM_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderZoomLane();
+}
+
+// zoom factor at time t (for the live preview): gradual PUSH-IN — ease (smoothstep)
+// from 1.0 to peak over `ramp` seconds, hold at peak till the window end, instant
+// return after. Matches the renderer's smoothstep push-in shape.
+function zoomFactorAt(t) {
+  let z = 1;
+  for (const s of [...(state.zoom || []), ...(state.combo || [])]) {   // combo also zooms
+    if (t < s.start || t >= s.end) continue;
+    const peak = +s.zoom || 1.4;
+    const span = s.end - s.start;                 // SAME ease as grow → combo stays in sync
+    let r = +s.ramp || 0; if (r <= 0) r = Math.min(1.0, span * 0.4);
+    r = Math.max(0.12, Math.min(span * 0.9, r));
+    let k = Math.max(0, Math.min(1, (t - s.start) / r));
+    k = 1 - Math.pow(1 - k, 3);                    // ease-out cubic (matches growHeightFracAt)
+    z = Math.max(z, 1 + (peak - 1) * k);
+  }
+  return z;
+}
+
+// Apply a center-anchored top-slot zoom around rect (x,y,w,h) for the previews.
+function withTopZoom(ctx, t, x, y, w, h, draw) {
+  const z = zoomFactorAt(t);
+  if (z <= 1.001) { draw(); return; }
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  const cx = x + w / 2, cy = y + h / 2;
+  ctx.translate(cx, cy); ctx.scale(z, z); ctx.translate(-cx, -cy);
+  draw();
+  ctx.restore();
+}
+
+// ───────────────────────── grow+zoom combo lane (Position step) ───────────────
+// One window doing BOTH grow (top_frac) and zoom (punch-in), instant snap-back.
+// state.combo = [{start,end,top_frac,zoom,ramp}]; expanded to grow+zoom at render.
+const COMBO_MIN = 0.2;
+
+function renderComboLane() {
+  const host = els.combos || $('#combos');
+  if (!host || !state.source) return;
+  const dur = state.source.duration || 1;
+  host.innerHTML = (state.combo || []).map((c, i) => {
+    const left = (c.start / dur) * 100;
+    const width = Math.max(0.8, ((c.end - c.start) / dur) * 100);
+    const zf = (+c.zoom || 1.4).toFixed(2).replace(/\.?0+$/, '');
+    const eighths = ((c.top_frac || 0.4375) * 8).toFixed(2).replace(/\.?0+$/, '');
+    return `<div class="combo-bar" data-i="${i}" style="left:${left}%;width:${width}%" `
+      + `title="grow ${eighths}/8 + zoom ${zf}× · ${c.start.toFixed(1)}–${c.end.toFixed(1)}s — drag to move, edges to resize, double-click to delete">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">⤢${zf}× ↕${eighths}/8</span><span class="cut-bar-h r"></span></div>`;
+  }).join('') || '<span class="cut-lane-empty">— no grow+zoom windows —</span>';
+}
+
+function renderComboList() {
+  const ol = $('#combo-list');
+  if (!ol) return;
+  if (!state.combo || !state.combo.length) { ol.innerHTML = ''; return; }
+  ol.innerHTML = state.combo.map((c, i) =>
+    `<li class="ill-row"><span class="ill-row-t">${c.start.toFixed(1)}→${c.end.toFixed(1)}s</span>`
+    + `<label>zoom <select class="combo-row-zoom" data-i="${i}">`
+    + ['1.2', '1.3', '1.4', '1.5', '1.75', '2'].map(v => `<option value="${v}"${Math.abs(+v - (+c.zoom || 1.4)) < 1e-4 ? ' selected' : ''}>${v}×</option>`).join('')
+    + `</select></label>`
+    + `<label>size <select class="combo-row-frac" data-i="${i}">`
+    + ['0.40625:3.25', '0.4375:3.5', '0.46875:3.75', '0.5:4', '0.5625:4.5', '0.625:5'].map(o => { const [v, l] = o.split(':'); return `<option value="${v}"${Math.abs(+v - (c.top_frac || 0.4375)) < 1e-4 ? ' selected' : ''}>${l}/8</option>`; }).join('')
+    + `</select></label>`
+    + `<label>in <input class="combo-row-in" data-i="${i}" type="number" min="0.1" max="20" step="0.1" value="${(+c.ramp || 1.5)}" style="width:46px"> s</label>`
+    + `<button class="ill-del combo-row-del" data-i="${i}" title="delete">×</button></li>`
+  ).join('');
+  ol.querySelectorAll('.combo-row-zoom').forEach(s => s.addEventListener('change', e => { state.combo[+e.target.dataset.i].zoom = +e.target.value; renderComboLane(); comboChanged(); }));
+  ol.querySelectorAll('.combo-row-frac').forEach(s => s.addEventListener('change', e => { state.combo[+e.target.dataset.i].top_frac = +e.target.value; renderComboLane(); comboChanged(); }));
+  ol.querySelectorAll('.combo-row-in').forEach(s => s.addEventListener('input', e => { state.combo[+e.target.dataset.i].ramp = Math.max(0.1, +e.target.value || 1.5); renderComboLane(); comboChanged(); }));
+  ol.querySelectorAll('.combo-row-del').forEach(b => b.addEventListener('click', () => { state.combo.splice(+b.dataset.i, 1); renderComboLane(); renderComboList(); comboChanged(); }));
+}
+
+function comboChanged() {
+  try { redrawPreviews(); } catch (_) {}
+  try { autosaveQueue(); } catch (_) {}
+}
+
+function addComboHere() {
+  if (!state.source) return;
+  const dur = state.source.duration || 0;
+  const a = state.currentTime || 0;
+  const b = Math.min(a + 2.0, dur);
+  if (b - a < COMBO_MIN) { setStatus('tr-status', 'Move the playhead earlier — not enough room.', 'err'); return; }
+  const amt = +($('#combo-zoom') ? $('#combo-zoom').value : 1.4) || 1.4;
+  const frac = +($('#combo-frac') ? $('#combo-frac').value : 0.4375) || 0.4375;
+  const zin = Math.max(0.1, +($('#combo-in') ? $('#combo-in').value : 1.5) || 1.5);
+  state.combo = state.combo || [];
+  state.combo.push({ start: +a.toFixed(2), end: +b.toFixed(2), top_frac: frac, zoom: amt, ramp: zin });
+  state.combo.sort((x, y) => x.start - y.start);
+  renderComboLane(); renderComboList(); comboChanged();
+}
+
+function onComboBarDown(e) {
+  const bar = e.target.closest('.combo-bar');
+  if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i;
+  const rect = (els.combos || $('#combos')).getBoundingClientRect();
+  const br = bar.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('cut-bar-h')) mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  else if ((e.clientX - br.left) < 10) mode = 'resize-l';
+  else if ((br.right - e.clientX) < 10) mode = 'resize-r';
+  state.comboDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: state.combo[i].start, b: state.combo[i].end };
+}
+
+function onComboDragMove(e) {
+  const d = state.comboDrag;
+  if (!d) return;
+  const dur = (state.source && state.source.duration) || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const c = state.combo[d.i];
+  if (!c) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    c.start = +ns.toFixed(2); c.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    c.start = +Math.max(0, Math.min(d.a + dt, c.end - COMBO_MIN)).toFixed(2);
+  } else {
+    c.end = +Math.max(c.start + COMBO_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderComboLane();
 }
 
 function addBoxCut(n) {
@@ -1645,13 +2031,17 @@ function redrawPreview(canvas) {
   if (!state.source) return;
   const b1 = boxAt(1, state.currentTime);
   const b2 = boxAt(2, state.currentTime);
-  const topH = (TOP_H / OUT_H) * PREVIEW_H;
+  const baseTopH = (TOP_H / OUT_H) * PREVIEW_H;
   const botH = (BOTTOM_H / OUT_H) * PREVIEW_H;
+  // top slot may be GROWN at this time (covers the top of the fixed bottom box)
+  const topH = growHeightFracAt(state.currentTime) * PREVIEW_H;
 
   const single = !!b1 ^ !!b2;
   if (b1 && b2) {
-    drawSlot(ctx, b1, 0, 0, PREVIEW_W, topH, currentFit(1));
-    drawSlot(ctx, b2, 0, topH, PREVIEW_W, botH, currentFit(2));
+    // bottom stays at its fixed spot; the (possibly taller) top is drawn OVER it
+    drawSlot(ctx, b2, 0, baseTopH, PREVIEW_W, botH, currentFit(2));
+    withTopZoom(ctx, state.currentTime, 0, 0, PREVIEW_W, topH,
+      () => drawSlot(ctx, b1, 0, 0, PREVIEW_W, topH, currentFit(1)));
     drawCaptionPreview(ctx, topH);
   } else if (b1) {
     // single box → full 1080×1920 focus on this box
@@ -1875,6 +2265,9 @@ async function doDownload() {
     state.sfx = [];                // placements are per-clip
     state.ills = [];               // cutaways are per-clip
     state.keep = []; state.keepA = null;  // keep-windows are per-clip
+    state.grow = [];                       // top-slot grow windows are per-clip
+    state.zoom = [];                       // top-slot zoom windows are per-clip
+    state.combo = [];                      // top-slot grow+zoom windows are per-clip
     state.autoObs = '';            // no model observation for an ad-hoc clip
     if ($('#ab-context')) $('#ab-context').value = '';   // context is per-clip
     resetThumbSlots();             // thumbnail backgrounds reference the old clip
@@ -2109,12 +2502,17 @@ function buildRenderBody(withWords) {
     words: withWords ? state.words : [],
     caption_font: state.caption.font,
     caption_size: state.caption.size,
+    caption_style: state.caption.style || 'color',
+    caption_color: state.caption.color || 'yellow',
     cleanup: false,
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
     sfx: state.sfx,
     illustrations: state.ills.map(c => ({ t_start: c.t_start, t_end: c.t_end, url: c.url, target: c.target || 'full', fit: c.fit || 'cover' })),
     keep_segments: state.keep.map(s => ({ start: s.start, end: s.end })),
+    grow_segments: (state.grow || []).map(g => ({ start: g.start, end: g.end, top_frac: g.top_frac, ramp: g.ramp || 0 })),
+    zoom_segments: (state.zoom || []).map(z => ({ start: z.start, end: z.end, zoom: +z.zoom || 1.4, ramp: +z.ramp || 1.5 })),
+    combo_segments: (state.combo || []).map(c => ({ start: c.start, end: c.end, top_frac: c.top_frac || 0.4375, zoom: +c.zoom || 1.4, ramp: +c.ramp || 1.5 })),
   };
   logBoxes(body);
   return body;
@@ -3107,6 +3505,8 @@ function wireQueue() {
   if (rqAll) rqAll.addEventListener('click', renderAllReady);
   const stop = $('#btn-queue-stop-box');
   if (stop) stop.addEventListener('click', stopBoxing);
+  $('#btn-queue-stop-render') && $('#btn-queue-stop-render').addEventListener('click', stopRendering);
+  $('#btn-rq-stop') && $('#btn-rq-stop').addEventListener('click', stopRendering);
   const rsel = $('#room-select');
   if (rsel) rsel.addEventListener('change', refreshQueue);
   const rnew = $('#btn-room-new');
@@ -3192,18 +3592,34 @@ function renderRenderQueue(jobs) {
     const statusCell = j.status === 'rendering'
       ? `<span class="rq-prog">${escapeHtml(j.message || 'rendering…')}</span>`
       : statusBadge(j.status);
+    const canStop = j.status === 'rendering' || j.status === 'render_queued';
     const renderBtn = canRender
       ? `<button class="rq-render" data-key="${j.key}" title="${j.status === 'done' ? 're-render this clip' : 'render this clip (background)'}">▶</button>` : '';
+    const stopBtn = canStop
+      ? `<button class="rq-stop-one" data-key="${j.key}" title="${j.status === 'rendering' ? 'stop this render' : 'cancel — pull this clip out of the render queue'}">■</button>` : '';
     const dl = j.output_path
       ? `<a class="rq-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>` : '';
     return `<li class="rq-item${active}" data-status="${j.status}">
       <span class="rq-id">${escapeHtml(j.id)}</span>
       <span class="rq-title">${escapeHtml(j.title || '')}</span>
       <span class="rq-status">${statusCell}</span>
-      <span class="rq-actions">${renderBtn}${dl}</span>
+      <span class="rq-actions">${renderBtn}${stopBtn}${dl}</span>
     </li>`;
   }).join('');
   ul.querySelectorAll('.rq-render').forEach(b => b.addEventListener('click', () => renderQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.rq-stop-one').forEach(b => b.addEventListener('click', () => stopRenderOne(b.dataset.key)));
+}
+
+async function stopRenderOne(key) {
+  try {
+    const r = await apiPost(`/api/queue/${key}/stop-render`, {});
+    setStatus('queue-status',
+      r.killed ? 'Render stopped (killed the running ffmpeg) — clip back to ready.'
+               : 'Pulled out of the render queue — clip back to ready.', 'ok');
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Stop failed: ' + e.message, 'err');
+  }
 }
 
 async function stopBoxing() {
@@ -3214,6 +3630,17 @@ async function stopBoxing() {
     refreshQueue();
   } catch (e) {
     setStatus('queue-status', 'Stop failed: ' + e.message, 'err');
+  }
+}
+
+async function stopRendering() {
+  try {
+    const r = await apiPost('/api/queue/stop-render', {});
+    setStatus('queue-status',
+      `Render stopped${r.killed ? ' (killed the running render)' : ''} — ${r.reset} clip(s) back to ready.`, 'ok');
+    refreshQueue();
+  } catch (e) {
+    setStatus('queue-status', 'Stop render failed: ' + e.message, 'err');
   }
 }
 
@@ -3271,6 +3698,12 @@ function renderQueueList(jobs, boxEta) {
     const boxingActive = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0);
     stopBtn.classList.toggle('hidden', boxingActive === 0);
   }
+  // Stop-render button visible only while a render is running or queued
+  const renderActive = (c.rendering || 0) + (c.render_queued || 0);
+  const stopRenderBtn = $('#btn-queue-stop-render');
+  if (stopRenderBtn) stopRenderBtn.classList.toggle('hidden', renderActive === 0);
+  const rqStop = $('#btn-rq-stop');
+  if (rqStop) rqStop.classList.toggle('hidden', renderActive === 0);
   // progress bar = clips that made it through boxing (ready/done/error) of all
   if (prog) {
     prog.classList.remove('hidden');
@@ -3310,6 +3743,9 @@ function renderQueueList(jobs, boxEta) {
     const dl = j.output_path
       ? `<a class="q-dl" href="${j.output_path}" download="${escapeHtml(j.filename || 'clip.mp4')}" title="download the rendered mp4">↓</a>`
       : '';
+    const stopOne = (j.status === 'rendering' || j.status === 'render_queued')
+      ? `<button class="q-stop" data-key="${j.key}" title="${j.status === 'rendering' ? 'stop this render (kills it on the GPU box)' : 'cancel — pull out of the render queue'}">■</button>`
+      : '';
     const retry = j.status === 'error' ? `<button class="q-retry" data-key="${j.key}" title="retry this job">↻</button>` : '';
     // A job waiting in the boxing queue can be pulled out: ready NOW, no boxes,
     // the user draws them manually instead of waiting for the AI stage.
@@ -3329,12 +3765,13 @@ function renderQueueList(jobs, boxEta) {
             ? `<span class="q-prog">${escapeHtml(j.message || 'rendering…')}</span>`
             : statusBadge(j.status)}${kf}${roomChip}${qc}</span>
       </button>
-      ${dl}${rebox}${renderBtn}${skip}${retry}
+      ${dl}${rebox}${renderBtn}${stopOne}${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its files">×</button>
     </li>`;
   }).join('');
   ul.querySelectorAll('.queue-open').forEach(b => b.addEventListener('click', () => openQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-render').forEach(b => b.addEventListener('click', () => renderQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-stop').forEach(b => b.addEventListener('click', () => stopRenderOne(b.dataset.key)));
   ul.querySelectorAll('.q-del').forEach(b => b.addEventListener('click', () => deleteQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-retry').forEach(b => b.addEventListener('click', () => retryQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-skip').forEach(b => b.addEventListener('click', () => skipBoxQueueJob(b.dataset.key)));
@@ -3387,13 +3824,21 @@ async function openQueueJob(key) {
   state.sfx = _parse(job.sfx, []);                 // Sound step placements
   state.ills = _parse(job.illustrations, []);      // Illustration cutaways
   state.keep = _parse(job.keep_segments, []);      // Trim keep-windows
-  const _cap = _parse(job.caption, null);          // caption font/size
+  state.grow = _parse(job.grow_segments, []);      // top-slot grow windows
+  state.zoom = _parse(job.zoom_segments, []);      // top-slot zoom windows
+  state.combo = _parse(job.combo_segments, []);    // top-slot grow+zoom windows
+  const _cap = _parse(job.caption, null);          // caption font/size/style/color
+  state.caption.style = 'color'; state.caption.color = 'yellow';   // per-clip defaults
   if (_cap && typeof _cap === 'object') {
     if (_cap.font) state.caption.font = _cap.font;
-    if (_cap.size) state.caption.size = _cap.size;
+    if (_cap.size) state.caption.size = Math.min(160, Math.max(24, +_cap.size || 64));
+    if (_cap.style) state.caption.style = _cap.style;
+    if (_cap.color) state.caption.color = _cap.color;
     if (els.capFont) els.capFont.value = state.caption.font;
     if (els.capSize) els.capSize.value = state.caption.size;
   }
+  if (els.capStyle) els.capStyle.value = state.caption.style;
+  if (els.capColor) els.capColor.value = state.caption.color;
   resetThumbSlots();               // thumbnail backgrounds reference the old clip
   // Restore this clip's saved thumbnail (headline + style), if any.
   if (job.thumbnail) {
@@ -3443,7 +3888,7 @@ function queueSig() {
     p1: ($('#ab-prompt-1') ? $('#ab-prompt-1').value : ''),
     p2: ($('#ab-prompt-2') ? $('#ab-prompt-2').value : ''),
     th: thumbSettings(),
-    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption,
+    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption, grow: state.grow, zoom: state.zoom, combo: state.combo,
   });
 }
 
@@ -3465,9 +3910,19 @@ async function autosaveQueue() {
       sfx: JSON.stringify(state.sfx || []),
       illustrations: JSON.stringify(state.ills || []),
       keep_segments: JSON.stringify(state.keep || []),
+      grow_segments: JSON.stringify(state.grow || []),
+      zoom_segments: JSON.stringify(state.zoom || []),
+      combo_segments: JSON.stringify(state.combo || []),
       caption: JSON.stringify(state.caption || {}),
     });
     setStatus('queue-status', 'Progress saved ✓', 'ok');
+    // Keep the intro-card PNG in sync so a LATER batch / ▶ render (when this clip
+    // ISN'T the open one) still finds a fresh temp/{job}_intro.png. Without this the
+    // intro card (with the headline) only got composed for the currently-open clip,
+    // so batch-rendered clips lost their intro. Best-effort, non-blocking.
+    if (thumb.intro && thumb.intro.enabled && state.jobId) {
+      prepareIntro().catch(() => {});
+    }
   } catch (e) { /* try again next tick — keep the new sig so we don't spin */ }
 }
 
@@ -4117,10 +4572,12 @@ function drawComposite(ctx, v, t, W, H, opts) {
     coverDraw(ctx, v, 0, 0, W, H);                    // nothing boxed yet → raw
   } else {
     const b1 = boxAt(1, t), b2 = boxAt(2, t);
-    const topH = H * 3 / 8;
+    const baseTopH = H * 3 / 8;
+    const topH = growHeightFracAt(t) * H;   // top may grow over the fixed bottom
     if (b1 && b2) {
-      drawCropBox(ctx, v, b1, 0, 0, W, topH, kfFitAtT(state.keyframes[1], t));
-      drawCropBox(ctx, v, b2, 0, topH, W, H - topH, kfFitAtT(state.keyframes[2], t));
+      drawCropBox(ctx, v, b2, 0, baseTopH, W, H - baseTopH, kfFitAtT(state.keyframes[2], t));
+      withTopZoom(ctx, t, 0, 0, W, topH,
+        () => drawCropBox(ctx, v, b1, 0, 0, W, topH, kfFitAtT(state.keyframes[1], t)));
     } else if (b1 || b2) {
       const n = b1 ? 1 : 2;                           // single-box full-focus mode
       drawCropBox(ctx, v, b1 || b2, 0, 0, W, H, kfFitAtT(state.keyframes[n], t));

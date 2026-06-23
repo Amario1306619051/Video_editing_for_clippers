@@ -2,13 +2,14 @@ import json
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
 import pexels
 import soundboard
 import tts
-from models import IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word
+from models import ComboSegment, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word, ZoomSegment
 
 TEMP_DIR = Path(__file__).resolve().parent.parent / "temp"
 
@@ -45,6 +46,11 @@ FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 # currently being spoken pops to the accent color.
 CAPTION_FILL = "#FFFFFF"
 CAPTION_HIGHLIGHT = "#E8FF3A"
+# The active (currently-spoken) word emphasis: pick a COLOR + a MODE.
+#   mode 'color'     — the word's TEXT turns this colour (+ slight pop)
+#   mode 'highlight' — the word gets a filled box of this colour behind it
+CAPTION_COLORS = {"yellow": "#E8FF3A", "green": "#46D369", "blue": "#4FB0FF"}
+_HL_TEXT = {"yellow": "#101010", "green": "#0A1F12", "blue": "#FFFFFF"}  # text colour on the box
 
 OUT_W = 1080
 OUT_H = 1920
@@ -179,7 +185,8 @@ def _ass_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def _build_ass(groups: list[dict], font: str, size: int, caption_y_for) -> str:
+def _build_ass(groups: list[dict], font: str, size: int, caption_y_for,
+               style: str = "color", color: str = "yellow") -> str:
     """`caption_y_for` is either an int (single y for all groups) or a callable
     taking a group's start time and returning the y to use. Per-group y enables
     caption repositioning when the layout switches between vstack and
@@ -187,14 +194,30 @@ def _build_ass(groups: list[dict], font: str, size: int, caption_y_for) -> str:
 
     TikTok-karaoke style: each word group is emitted as one Dialogue line per
     word time-slice; in each slice every word is shown but the word currently
-    being spoken is recolored to the accent + bumped slightly in scale. Whisper
-    per-word timestamps (kept in group["words"]) drive the slice boundaries.
-    Fat outline + shadow so it reads over any footage.
+    being spoken is emphasised. `style` picks the emphasis:
+      - 'color'     — the active word's TEXT turns `color` (+ a slight pop)
+      - 'highlight' — the active word gets a filled `color` box behind it
+                      (thick coloured border merges into a band; dark/white text)
+    `color` ∈ {yellow, green, blue}. Whisper per-word timestamps (group["words"])
+    drive the slice boundaries. Fat outline + shadow so it reads over any footage.
     """
+    size = int(size or 64)
+    if size < 20:           # a tiny size is corruption, not intent → use the normal default
+        size = 64
+    size = min(200, size)
     primary = to_ass_color(CAPTION_FILL)
-    highlight = to_ass_color(CAPTION_HIGHLIGHT)
+    hlcol = to_ass_color(CAPTION_COLORS.get(color, CAPTION_COLORS["yellow"]))
     outline = to_ass_color("#000000")
     back = to_ass_color("#000000")
+    # Active-word emphasis tags (open before the word, close = reset to defaults).
+    if style == "highlight":
+        htext = to_ass_color(_HL_TEXT.get(color, "#101010"))
+        hl_bord = max(8, int(round(size * 0.22)))
+        active_open = f"{{\\1c{htext}\\3c{hlcol}\\3a&H00&\\bord{hl_bord}\\shad0}}"
+        active_close = f"{{\\1c{primary}\\3c{outline}\\bord6\\shad3}}"
+    else:  # 'color' — recolor the word's text
+        active_open = f"{{\\1c{hlcol}\\fscx112\\fscy112}}"
+        active_close = f"{{\\1c{primary}\\fscx100\\fscy100}}"
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -228,8 +251,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for k, wk in enumerate(words):
                 t = _ass_escape(wk["text"]).upper()
                 if k == j:
-                    # active word: accent fill + slight pop, then reset to white/100%
-                    parts.append(f"{{\\1c{highlight}\\fscx112\\fscy112}}{t}{{\\1c{primary}\\fscx100\\fscy100}}")
+                    parts.append(f"{active_open}{t}{active_close}")
                 else:
                     parts.append(t)
             text = pos + " ".join(parts)
@@ -931,18 +953,53 @@ def _prepend_intro(main_path: Path, job_id: str, intro: IntroConfig) -> Path:
     return main_path
 
 
+# The currently-running render's ffmpeg process, so a "stop render" can kill it.
+_render_lock = threading.Lock()
+_active_proc = None
+
+
+def terminate_active() -> bool:
+    """Kill the in-progress render's ffmpeg, if any. Returns True if one was killed."""
+    with _render_lock:
+        p = _active_proc
+    if p is not None and p.poll() is None:
+        try:
+            p.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            p.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+    return False
+
+
 def _run_render(cmd: list[str], progress_cb: Optional[Callable[[float], None]], total_dur: float) -> None:
     """Run the ffmpeg render. With a progress_cb, stream `-progress` so the caller
     gets a 0..1 fraction live; otherwise a plain blocking run. Raises on non-zero
     exit with the captured stderr (same contract as the old subprocess.run)."""
+    global _active_proc
     if not progress_cb or not total_dur or total_dur <= 0:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with _render_lock:
+            _active_proc = proc
+        try:
+            _out, stderr = proc.communicate()
+        finally:
+            with _render_lock:
+                _active_proc = None
         if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg render failed:\n{proc.stderr}")
+            raise RuntimeError(f"ffmpeg render failed:\n{stderr}")
         return
     # ffmpeg writes machine-readable progress blocks to stdout via `-progress pipe:1`.
     pcmd = cmd[:-1] + ["-progress", "pipe:1", "-nostats", cmd[-1]]
     proc = subprocess.Popen(pcmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with _render_lock:
+        _active_proc = proc
     try:
         for line in proc.stdout:                       # blocks until each block flushes
             line = line.strip()
@@ -960,12 +1017,200 @@ def _run_render(cmd: list[str], progress_cb: Optional[Callable[[float], None]], 
     finally:
         stderr = proc.stderr.read() if proc.stderr else ""
         proc.wait()
+        with _render_lock:
+            _active_proc = None
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg render failed:\n{stderr}")
     try:
         progress_cb(1.0)
     except Exception:  # noqa: BLE001
         pass
+
+
+# ───────────────────────── dynamic top-slot grow ─────────────────────────
+_GROW_STEP_PX = 24   # ramp height quantum (~0.1/8) — crop can't animate h, so stepped
+
+
+def _even(v: float) -> int:
+    return max(2, int(round(v / 2)) * 2)
+
+
+def _shift_grow(grows: list, start: float) -> list:
+    out = []
+    for g in grows or []:
+        s, e = float(g.start) - start, float(g.end) - start
+        if e <= 0:
+            continue
+        out.append(GrowSegment(start=max(0.0, s), end=e,
+                               top_frac=getattr(g, "top_frac", 0.4375) or 0.4375,
+                               ramp=getattr(g, "ramp", 0.0) or 0.0))
+    return out
+
+
+def _shift_zoom(zooms: list, start: float) -> list:
+    out = []
+    for z in zooms or []:
+        s, e = float(z.start) - start, float(z.end) - start
+        if e <= 0:
+            continue
+        out.append(ZoomSegment(start=max(0.0, s), end=e,
+                               zoom=float(getattr(z, "zoom", 1.3) or 1.3),
+                               bpm=float(getattr(z, "bpm", 120.0) or 120.0),
+                               ramp=float(getattr(z, "ramp", 0.4) or 0.0)))
+    return out
+
+
+def _ease_ramp(s: float, e: float, ramp: float) -> float:
+    """Effective ease-in duration shared by grow AND zoom so a combo stays in sync.
+    The user's `ramp` ("in" seconds) is the SPEED knob — small = fast, large = slow.
+    Tiny floor (0.12s) so it never becomes a jarring 1-frame snap; capped at 90% of
+    the window. ramp<=0 → a gentle auto-default. Same formula in `_grow_height_expr`
+    and `_zoom_factor_expr` → grow & zoom hit peak / snap back together (combo lane)."""
+    span = e - s
+    r = float(ramp or 0.0)
+    if r <= 0:
+        r = min(1.0, span * 0.4)
+    return max(0.12, min(span * 0.9, r))
+
+
+def _ease_shape(s: float, e: float, r: float) -> str:
+    """ffmpeg ease factor 0→1: EASE-OUT (cubic) ease-IN over r — fast/snappy start
+    then decelerate to the peak; hold at 1; gated to [s,e] (snaps to 0 instantly at
+    e). Shared by grow + zoom so they stay in sync. Ease-out front-loads the motion
+    so the effect 'arrives' quickly (the owner wanted a punchier, faster entry)."""
+    s_, e_, r_ = _fmt_num(s), _fmt_num(e), _fmt_num(r)
+    k = f"clip((t-{s_})/{r_},0,1)"
+    return f"between(t,{s_},{e_})*(1-(1-({k}))*(1-({k}))*(1-({k})))"
+
+
+def _ease_at(s: float, e: float, r: float, t: float) -> float:
+    """Python mirror of _ease_shape at time t (for caption Y) — ease-out cubic."""
+    if t < s or t >= e:
+        return 0.0
+    k = max(0.0, min(1.0, (t - s) / r))
+    return 1.0 - (1.0 - k) ** 3
+
+
+def _zoom_factor_expr(zooms: list) -> str:
+    """Build an ffmpeg `t`-expression for the gradual top-slot zoom factor Z(t).
+    Cinematic PUSH-IN: ease from 1.0 to the peak over the shared ease (smootherstep),
+    HOLD, then snap back to 1.0 at the window end. Uses the SAME _ease_ramp/_ease_shape
+    as grow so the combo lane (grow+zoom over one window) reaches peak / snaps in sync.
+    Outside every window Z=1. Commas safe in the single-quoted scale/crop value."""
+    terms = []
+    for z in zooms or []:
+        s, e = float(z.start), float(z.end)
+        if e - s <= 0.02:
+            continue
+        zf = max(1.0, min(3.0, float(getattr(z, "zoom", 1.4) or 1.4)))
+        if zf <= 1.0:
+            continue
+        r = _ease_ramp(s, e, float(getattr(z, "ramp", 1.5) or 1.5))
+        terms.append(f"{_fmt_num(zf - 1.0)}*{_ease_shape(s, e, r)}")
+    return "1+" + "+".join(terms) if terms else "1"
+
+
+def _apply_top_zoom(parts: list, in_label: str, w: int, h: int, expr: str, out_label: str) -> None:
+    """Wrap a top-slot stream [in_label] (w×h) with a smooth center punch-in zoom
+    driven by `expr` (a t-expression for Z). scale uses eval=frame (per-frame —
+    unlike crop, whose w/h is init-locked); crop re-centers using the same expr
+    (NOT in_w/in_h, which are also init-locked) so the zoom stays centered."""
+    parts.append(
+        f"[{in_label}]scale=w='{w}*({expr})':h='{h}*({expr})':eval=frame,"
+        f"crop={w}:{h}:x='({w}/2)*(({expr})-1)':y='({h}/2)*(({expr})-1)'[{out_label}]"
+    )
+
+
+def _grow_height_expr(grows: list, dur: float) -> str:
+    """ffmpeg `t`-expression for the SMOOTH top-slot height H(t) in px. Each window
+    eases (smoothstep) from TOP_H up to its target, holds, then eases back down —
+    a continuous grow (replaces the old stepped per-height overlays, which looked
+    choppy on render). Outside every window H = TOP_H. Non-overlapping windows sum
+    their (target-TOP_H) deltas. Commas safe in the single-quoted scale value."""
+    terms = []
+    for g in grows or []:
+        s, e = max(0.0, float(g.start)), min(dur, float(g.end))
+        if e - s <= 0.05:
+            continue
+        H = _even(max(TOP_H, min(OUT_H - 2, (float(getattr(g, "top_frac", 0.4375)) or 0.4375) * OUT_H)))
+        if H <= TOP_H:
+            continue
+        # Grow IN gently then HOLD, SNAP back at the window end — using the SAME ease
+        # as zoom (_ease_ramp/_ease_shape) so a combo's grow + zoom stay in lockstep.
+        r = _ease_ramp(s, e, float(getattr(g, "ramp", 0.0) or 0.0))
+        terms.append(f"{_fmt_num(H - TOP_H)}*{_ease_shape(s, e, r)}")
+    return f"{TOP_H}" + ("+" + "+".join(terms) if terms else "")
+
+
+def _grow_h_at(grows: list, dur: float, t: float) -> float:
+    """Python mirror of _grow_height_expr at time t (for caption Y placement)."""
+    H = float(TOP_H)
+    for g in grows or []:
+        s, e = max(0.0, float(g.start)), min(dur, float(g.end))
+        if e - s <= 0.05 or t < s or t >= e:
+            continue
+        Ht = _even(max(TOP_H, min(OUT_H - 2, (float(getattr(g, "top_frac", 0.4375)) or 0.4375) * OUT_H)))
+        if Ht <= TOP_H:
+            continue
+        r = _ease_ramp(s, e, float(getattr(g, "ramp", 0.0) or 0.0))
+        H = max(H, TOP_H + (Ht - TOP_H) * _ease_at(s, e, r, t))
+    return H
+
+
+def _grow_height_timeline(grows: list, dur: float) -> list[tuple[float, float, int]]:
+    """[(t0,t1,H_px)] covering [0,dur]; H=TOP_H outside grow windows, stepping up to
+    the target over `ramp` and back down. Stepped because crop's h is init-locked."""
+    if not grows:
+        return [(0.0, dur, TOP_H)]
+    gs = []
+    for g in grows:
+        s, e = max(0.0, float(g.start)), min(dur, float(g.end))
+        if e - s <= 0.05:
+            continue
+        H = _even(max(TOP_H, min(OUT_H - 2, (float(getattr(g, "top_frac", 0.4375)) or 0.4375) * OUT_H)))
+        ramp = max(0.0, float(getattr(g, "ramp", 0.0) or 0.0))
+        gs.append((s, e, H, ramp))
+    gs.sort(key=lambda x: x[0])
+    out: list[tuple[float, float, int]] = []
+    cur = 0.0
+    for s, e, H, ramp in gs:
+        s = max(s, cur)                      # clip overlaps (earlier window wins)
+        if e <= s:
+            continue
+        if s > cur:
+            out.append((cur, s, TOP_H))
+        if ramp <= 0.001 or H <= TOP_H:
+            out.append((s, e, H))
+        else:
+            n = max(1, round((H - TOP_H) / _GROW_STEP_PX))
+            rd = min(ramp, (e - s) / 2)
+            for i in range(n):              # ramp up
+                out.append((s + rd * i / n, s + rd * (i + 1) / n,
+                            _even(TOP_H + (H - TOP_H) * (i + 1) / n)))
+            if (e - rd) > (s + rd):         # hold
+                out.append((s + rd, e - rd, H))
+            for i in range(n):              # ramp down
+                out.append(((e - rd) + rd * i / n, (e - rd) + rd * (i + 1) / n,
+                            _even(H - (H - TOP_H) * (i + 1) / n)))
+        cur = e
+    if cur < dur:
+        out.append((cur, dur, TOP_H))
+    merged: list[tuple[float, float, int]] = []
+    for t0, t1, H in out:
+        if t1 - t0 < 1e-4:
+            continue
+        if merged and merged[-1][2] == H and abs(merged[-1][1] - t0) < 1e-3:
+            merged[-1] = (merged[-1][0], t1, H)
+        else:
+            merged.append((t0, t1, H))
+    return merged
+
+
+def _top_h_at(timeline: list[tuple[float, float, int]], t: float) -> int:
+    for t0, t1, H in timeline:
+        if t0 <= t < t1:
+            return H
+    return TOP_H
 
 
 def render(
@@ -977,16 +1222,32 @@ def render(
     words: list[Word],
     caption_font: str = "Bricolage Grotesque",
     caption_size: int = 64,
+    caption_style: str = "color",      # 'color' (recolor word) | 'highlight' (box)
+    caption_color: str = "yellow",     # yellow | green | blue
+
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
     illustrations: Optional[list[IllustrationPick]] = None,
     keep_segments: Optional[list[KeepSegment]] = None,
     intro: Optional[IntroConfig] = None,
+    grow_segments: Optional[list[GrowSegment]] = None,
+    zoom_segments: Optional[list[ZoomSegment]] = None,
+    combo_segments: Optional[list[ComboSegment]] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> dict:
     if not box1 and not box2:
         raise ValueError("at least one of box1/box2 must be provided")
+
+    # A combo window = grow + zoom together. Expand each into a GrowSegment AND a
+    # ZoomSegment over the same window; they compose in the top-slot composition.
+    if combo_segments:
+        grow_segments = list(grow_segments or []) + [
+            GrowSegment(start=c.start, end=c.end, top_frac=c.top_frac, ramp=c.ramp)
+            for c in combo_segments]
+        zoom_segments = list(zoom_segments or []) + [
+            ZoomSegment(start=c.start, end=c.end, zoom=c.zoom, ramp=c.ramp)
+            for c in combo_segments]
 
     # Multi-segment KEEP trim (drop the gaps). Probe duration once for clamping +
     # the SFX silent-base. When keep windows are set they OVERRIDE the single
@@ -1015,6 +1276,8 @@ def render(
             words = _shift_words(words, rs, re_)
         sfx = _shift_sfx(sfx, rs, re_)
         illustrations = _shift_illustrations(illustrations, rs, re_)
+        grow_segments = _shift_grow(grow_segments, rs)
+        zoom_segments = _shift_zoom(zoom_segments, rs)
 
     # Defense-in-depth: clamp boxes inside the actual source frame (no-op for
     # valid boxes; prevents an off-frame crop from crashing ffmpeg).
@@ -1035,20 +1298,33 @@ def render(
         )
     single_intervals = b1_only + b2_only
 
+    # Dynamic top-slot grow (only when both boxes + windows set): the top slot
+    # height varies SMOOTHLY over time (scale eval=frame); caption rides the
+    # moving boundary. grow_h_expr is the per-frame height H(t) in px.
+    grow_active = both and bool(grow_segments)
+    grow_h_expr = _grow_height_expr(grow_segments or [], src_dur) if grow_active else f"{TOP_H}"
+
+    # Smooth top-slot punch-in zoom (only when both boxes; applies to the TOP
+    # slot content, whether normal-height or grown). Z(t) expression drives a
+    # per-frame scale + re-centering crop. No-op (Z=1) outside the windows.
+    zoom_active = both and bool(zoom_segments)
+    zoom_expr = _zoom_factor_expr(zoom_segments or []) if zoom_active else "1"
+
     def _caption_y_for(t: float) -> int:
         # Single-box layout for the whole clip → center. Two-box vstack →
-        # slot boundary, except when a layout-switch interval covers this
-        # caption time, in which case it's effectively single-mode here too.
+        # slot boundary (which RISES when the top slot grows), except when a
+        # layout-switch interval covers this caption time → single-mode here too.
         if not both:
             return OUT_H // 2
         for t0, t1 in single_intervals:
             if t0 <= t < t1:
                 return OUT_H // 2
-        return TOP_H
+        return int(round(_grow_h_at(grow_segments or [], src_dur, t))) if grow_active else TOP_H
 
     # Build ASS subtitles
     groups = _group_words(words) if words else []
-    ass_text = _build_ass(groups, caption_font, caption_size, _caption_y_for)
+    ass_text = _build_ass(groups, caption_font, caption_size, _caption_y_for,
+                          style=caption_style, color=caption_color)
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
@@ -1068,26 +1344,56 @@ def render(
     # Two-box mode uses the 3/8 + 5/8 vstack split.
     parts: list[str] = []
     if both:
-        parts.extend(_crop_chain("0:v", box1, OUT_W, TOP_H, "top"))
-        parts.extend(_crop_chain("0:v", box2, OUT_W, BOTTOM_H, "bot"))
-        parts.append("[top][bot]vstack=inputs=2[stacked]")
+        if grow_active:
+            # SMOOTH top-slot grow: bottom stays full 5/8 at y=720; the top slot is
+            # rendered once at the normal height then uniformly scaled by H(t)/TOP_H
+            # per-frame (scale eval=frame — crop's h is init-locked, scale's isn't)
+            # and overlaid at y=0, covering the bottom's top edge down to H(t). The
+            # horizontal overflow from the uniform scale is centered via a t-driven
+            # overlay x (negative) and clipped by the canvas — no varying-size crop.
+            parts.extend(_crop_chain("0:v", box2, OUT_W, BOTTOM_H, "bot"))
+            parts.extend(_crop_chain("0:v", box1, OUT_W, TOP_H, "gtopbase"))
+            tb = "gtopbase"
+            if zoom_active:   # punch-in zoom on the top slot, then grow-scales it
+                _apply_top_zoom(parts, tb, OUT_W, TOP_H, zoom_expr, "gtopz")
+                tb = "gtopz"
+            # scale the TOP_H-tall base to height H(t), width grows proportionally.
+            gw = f"{OUT_W}*({grow_h_expr})/{TOP_H}"
+            parts.append(f"[{tb}]scale=w='{gw}':h='{grow_h_expr}':eval=frame[gtopg]")
+            parts.append(f"color=c=black:s={OUT_W}x{OUT_H}:r={OUT_FPS}[gbase]")
+            parts.append(f"[gbase][bot]overlay=0:{TOP_H}:shortest=1[gcur]")
+            parts.append(
+                f"[gcur][gtopg]overlay=x='-(({gw})-{OUT_W})/2':y=0:shortest=1[stacked]"
+            )
+        else:
+            parts.extend(_crop_chain("0:v", box1, OUT_W, TOP_H, "top"))
+            top_lbl = "top"
+            if zoom_active:   # punch-in zoom on the top slot before stacking
+                _apply_top_zoom(parts, "top", OUT_W, TOP_H, zoom_expr, "topz")
+                top_lbl = "topz"
+            parts.extend(_crop_chain("0:v", box2, OUT_W, BOTTOM_H, "bot"))
+            parts.append(f"[{top_lbl}][bot]vstack=inputs=2[stacked]")
         last = "stacked"
 
         # Per-segment layout switching: at times where only one box has real
         # content (the other is gap), overlay that box's full-frame version on
-        # top of the vstacked composite. Without this, gap segments leave a
-        # black slot — but the user's intent is "treat this like single-box
-        # mode for this stretch". (b1_only/b2_only computed above for captions.)
+        # top of the composite. Without this, gap segments leave a black slot —
+        # but the user's intent is "treat this like single-box mode for this
+        # stretch". (b1_only/b2_only computed above for captions.) This MUST run
+        # for the grow path too — otherwise adding any grow segment makes the
+        # single-box moments fall back to slot+black (the original bug report).
         if b1_only:
-            # b1full is only displayed during b1_only — mask the rest to gaps so the
-            # full-res crop/blur work is skipped for segments that never show fullscreen.
-            parts.extend(_crop_chain("0:v", _mask_keyframes_to_intervals(box1, b1_only), OUT_W, OUT_H, "b1full"))
+            # box1 full-frame, overlaid only during b1_only (where box2 is gap).
+            # NOTE: render the FULL box1 track (no interval-masking) — masking it to
+            # gaps broke the segmented-crop path for size-varying boxes (the full
+            # overlay came out black). Correctness over the small render saving.
+            parts.extend(_crop_chain("0:v", box1, OUT_W, OUT_H, "b1full"))
             parts.append(
                 f"[{last}][b1full]overlay=enable='{_enable_from_intervals(b1_only)}':shortest=1[sw1]"
             )
             last = "sw1"
         if b2_only:
-            parts.extend(_crop_chain("0:v", _mask_keyframes_to_intervals(box2, b2_only), OUT_W, OUT_H, "b2full"))
+            parts.extend(_crop_chain("0:v", box2, OUT_W, OUT_H, "b2full"))
             parts.append(
                 f"[{last}][b2full]overlay=enable='{_enable_from_intervals(b2_only)}':shortest=1[sw2]"
             )

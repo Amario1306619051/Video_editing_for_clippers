@@ -711,6 +711,43 @@ kbd {
 .cut-bar-h.r { right: 0; border-radius: 0 3px 3px 0; }
 .cut-bar-h:hover { background: rgba(255,255,255,.7); }
 
+/* top-slot grow lane bars (greenish, distinct from cut bars) */
+.grow-bar {
+  position: absolute; top: 1px; bottom: 1px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; cursor: move; overflow: hidden;
+  background: rgba(86,211,100,.22); border: 1px solid #56d364;
+}
+.grow-ctl { font-size: 11px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.grow-ctl select, .grow-ctl input { font-family: var(--mono); font-size: 11px; }
+#grow-list .ill-row { gap: 10px; }
+
+/* top-slot zoom lane bars (purple/violet, distinct from grow + cut bars) */
+.zoom-bar {
+  position: absolute; top: 1px; bottom: 1px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; cursor: move; overflow: hidden;
+  background: rgba(165,131,255,.22); border: 1px solid #a583ff;
+}
+#zoom-list .ill-row { gap: 10px; }
+
+/* Wider number inputs in the grow/zoom/combo controls + list rows — the default
+   inline width was too small to comfortably type a value into. */
+.grow-ctl input[type="number"],
+#grow-list input[type="number"],
+#zoom-list input[type="number"],
+#combo-list input[type="number"] { width: 76px !important; padding: 3px 6px; }
+#grow-list .ill-row label, #zoom-list .ill-row label, #combo-list .ill-row label { white-space: nowrap; }
+
+/* top-slot grow+zoom combo lane bars (teal/cyan, distinct from grow + zoom) */
+.combo-bar {
+  position: absolute; top: 1px; bottom: 1px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; cursor: move; overflow: hidden;
+  background: rgba(54,211,224,.22); border: 1px solid #36d3e0;
+}
+#combo-list .ill-row { gap: 8px; }
+
 .cut-controls { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .cut-controls-lbl { font-size: 11px; color: var(--text-dim); }
 .cut-btn {
@@ -1142,12 +1179,14 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .rq-status { min-width: 90px; text-align: right; }
 .rq-prog { color: var(--accent); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .rq-actions { display: flex; gap: 4px; }
-.rq-render, .rq-dl {
+.rq-render, .rq-dl, .rq-stop-one {
   background: var(--bg-elev-2); border: 1px solid var(--border-strong); color: var(--text);
   width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
   border-radius: 4px; text-decoration: none; font-size: 13px; cursor: pointer;
 }
 .rq-render:hover, .rq-dl:hover { border-color: var(--accent); color: var(--accent); }
+.rq-stop-one { color: #ff6b6b; }
+.rq-stop-one:hover { border-color: #ff6b6b; background: rgba(255,107,107,0.12); }
 
 /* Transcript editor (step 8) */
 .transcript-editor { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; max-height: 60vh; overflow-y: auto; align-content: flex-start; }
@@ -1228,12 +1267,14 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .q-badge.render_queued { color: var(--accent-2); border-color: var(--accent-2); }
 .q-badge.rendering { color: #0a0a0a; background: var(--accent-2); border-color: var(--accent-2); }
 .q-badge.done { color: #0a0a0a; background: var(--accent); border-color: var(--accent); }
-.q-render, .q-dl {
+.q-render, .q-dl, .q-stop {
   flex: 0 0 auto; border: none; background: transparent; color: var(--text-mute);
   padding: 0 7px; border-radius: 0; font-size: 13px; line-height: 1;
   display: flex; align-items: center; text-decoration: none;
 }
 .q-render:hover, .q-dl:hover { color: var(--accent); background: #ffffff0a; border-color: transparent; }
+.q-stop { color: #ff6b6b; }
+.q-stop:hover { background: rgba(255,107,107,0.14); }
 .q-skip {
   flex: 0 0 auto; border: none; background: transparent; color: var(--text-mute);
   padding: 0 7px; font-size: 10px; line-height: 1; white-space: nowrap;
