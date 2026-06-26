@@ -55,6 +55,9 @@ const state = {
   keep: [],                               // keep-windows {start,end} (everything else cut at render)
   keepA: null,                            // pending in-point while marking A→B
   keepDrag: null,                         // drag state for a keep block
+  subclips: [],                           // sub-clips: one session → many exports [{name,start,end,snap}]
+  activeSub: null,                        // index of the sub-clip currently loaded into the editor
+  subDrag: null,                          // drag state for a sub-clip range bar
   sfxDrag: null,                          // drag state for a sound bar/pin
   cutDrag: null,                          // drag state for a per-box cut bar (Position step)
 };
@@ -113,6 +116,22 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-render-nocap').addEventListener('click', doRenderNoCaption);
   $('#btn-tr-transcribe') && $('#btn-tr-transcribe').addEventListener('click', transcribeForEdit);
   $('#btn-tr-clear') && $('#btn-tr-clear').addEventListener('click', clearTranscript);
+
+  // sub-clips (one source → many exports) — lives on the Position step; uses the
+  // Position playhead for Start/End so there's no separate preview to manage.
+  $('#btn-sub-add') && $('#btn-sub-add').addEventListener('click', addSubclip);
+  $('#btn-sub-update') && $('#btn-sub-update').addEventListener('click', updateSubclip);
+  $('#btn-sub-render') && $('#btn-sub-render').addEventListener('click', renderAllSubclips);
+  $('#btn-sub-start') && $('#btn-sub-start').addEventListener('click', () => setSubRange('start', state.currentTime || 0));
+  $('#btn-sub-end') && $('#btn-sub-end').addEventListener('click', () => setSubRange('end', state.currentTime || 0));
+  $('#subclip-track') && $('#subclip-track').addEventListener('mousedown', onSubTrackDown);
+  window.addEventListener('mousemove', onSubDragMove);
+  window.addEventListener('mouseup', () => {
+    const d = state.subDrag; if (!d) return;
+    state.subDrag = null;
+    if (!d.moved) loadSubclip(d.i);   // click (no drag) loads the sub-clip back
+    else renderSubclips();            // a drag changed its range → persist + redraw
+  });
 
   // Render sub-range inputs
   $('#rd-start').addEventListener('input', onRangeInput);
@@ -385,6 +404,7 @@ function showStep(n) {
       redrawOverlay();
       redrawPreviews();
       renderAutoRange();
+      try { renderSubclips(); updateSubRangeLbl(); } catch (e) { /* */ }
     });
   }
   if (n === 3) {
@@ -916,6 +936,7 @@ function renderEverything() {
   try { renderSfxTrack(); renderSfxList(); } catch (e) { /* step UI not ready */ }
   try { renderIllTrack(); renderIllList(); } catch (e) { /* step UI not ready */ }
   try { renderTrimTrack(); renderTrimList(); } catch (e) { /* step UI not ready */ }
+  try { renderSubclips(); } catch (e) { /* step UI not ready */ }
   try { renderWordChips(); } catch (e) { /* no transcript */ }
   try { updateRangeMeta(); } catch (e) { /* */ }
 }
@@ -2268,6 +2289,7 @@ async function doDownload() {
     state.grow = [];                       // top-slot grow windows are per-clip
     state.zoom = [];                       // top-slot zoom windows are per-clip
     state.combo = [];                      // top-slot grow+zoom windows are per-clip
+    state.subclips = []; state.activeSub = null;   // sub-clips are per-session
     state.autoObs = '';            // no model observation for an ad-hoc clip
     if ($('#ab-context')) $('#ab-context').value = '';   // context is per-clip
     resetThumbSlots();             // thumbnail backgrounds reference the old clip
@@ -3827,6 +3849,7 @@ async function openQueueJob(key) {
   state.grow = _parse(job.grow_segments, []);      // top-slot grow windows
   state.zoom = _parse(job.zoom_segments, []);      // top-slot zoom windows
   state.combo = _parse(job.combo_segments, []);    // top-slot grow+zoom windows
+  state.subclips = []; state.activeSub = null;     // sub-clips are per-session (not persisted yet)
   const _cap = _parse(job.caption, null);          // caption font/size/style/color
   state.caption.style = 'color'; state.caption.color = 'yellow';   // per-clip defaults
   if (_cap && typeof _cap === 'object') {
@@ -4720,6 +4743,227 @@ function wireTrim() {
 function trimDur() {
   return (els.trimVideo && els.trimVideo.duration) ? els.trimVideo.duration
     : (state.source ? state.source.duration : 0) || 0;
+}
+
+// ═══════════════════════ Sub-clips: one session → many exports ═══════════════
+// Each sub-clip is an independent SNAPSHOT of the whole editor (its own boxes,
+// caption, effects, sfx, cutaways) + a [start,end] export range. "Render all"
+// renders each snapshot to its own file. Snapshots live for the session only.
+function subDur() { return (state.source && state.source.duration) || (els.video && els.video.duration) || 1; }
+
+function subSnapshot() {
+  return JSON.parse(JSON.stringify({
+    keyframes: state.keyframes,
+    grow: state.grow, zoom: state.zoom, combo: state.combo,
+    caption: state.caption,
+    sfx: state.sfx, ills: state.ills, keep: state.keep,
+  }));
+}
+
+function subApply(snap) {   // load a snapshot back into the live editor for tweaking
+  if (!snap) return;
+  const c = (v) => JSON.parse(JSON.stringify(v));
+  state.keyframes = c(snap.keyframes || { 1: [], 2: [] });
+  state.grow = c(snap.grow || []); state.zoom = c(snap.zoom || []); state.combo = c(snap.combo || []);
+  state.caption = Object.assign({ font: 'Anton', size: 64, style: 'color', color: 'yellow' }, snap.caption || {});
+  state.sfx = c(snap.sfx || []); state.ills = c(snap.ills || []); state.keep = c(snap.keep || []);
+  if (els.capFont) els.capFont.value = state.caption.font;
+  if (els.capSize) els.capSize.value = state.caption.size;
+  if (els.capStyle) els.capStyle.value = state.caption.style;
+  if (els.capColor) els.capColor.value = state.caption.color;
+  renderEverything();
+}
+
+function addSubclip() {
+  if (!state.source) { setStatus('tr-status', 'Load a clip first.', 'err'); return; }
+  const dur = subDur();
+  let start = state.renderRange.start, end = state.renderRange.end;
+  if (start == null) start = 0;
+  if (end == null) end = Math.min(dur, start + 30);
+  const base = ($('#f-title').value || 'clip').trim() || 'clip';
+  state.subclips.push({ name: `${base}_${state.subclips.length + 1}`, start: +start.toFixed(2), end: +end.toFixed(2), snap: subSnapshot() });
+  state.activeSub = state.subclips.length - 1;
+  renderSubclips();
+  setStatus('tr-status', `Sub-clip ${state.subclips.length} saved with its own boxes/caption/effects. re-frame + Add again for the next one.`, 'ok');
+}
+
+function updateSubclip() {   // save the current editor back into the selected sub-clip
+  const i = state.activeSub;
+  if (i == null || !state.subclips[i]) { addSubclip(); return; }
+  const sc = state.subclips[i];
+  sc.snap = subSnapshot();
+  if (state.renderRange.start != null) sc.start = +state.renderRange.start.toFixed(2);
+  if (state.renderRange.end != null) sc.end = +state.renderRange.end.toFixed(2);
+  renderSubclips();
+  setStatus('tr-status', `Updated "${sc.name}".`, 'ok');
+}
+
+function loadSubclip(i) {     // bring a saved sub-clip's state into the editor
+  const sc = state.subclips[i]; if (!sc) return;
+  subApply(sc.snap);
+  state.renderRange = { start: sc.start, end: sc.end };
+  if ($('#rd-start')) $('#rd-start').value = sc.start;
+  if ($('#rd-end')) $('#rd-end').value = sc.end;
+  try { updateRangeMeta(); } catch (e) { /* */ }
+  state.activeSub = i;
+  renderSubclips();
+  // seek the Position video to this sub-clip's start so the preview shows it
+  if (els.video && els.video.duration) els.video.currentTime = Math.min(sc.start, els.video.duration - 0.05);
+  updateSubRangeLbl();
+  setStatus('tr-status', `Loaded "${sc.name}". Tweak the boxes, then ⤓ Save edits to keep them.`, 'ok');
+}
+
+function deleteSubclip(i) {
+  state.subclips.splice(i, 1);
+  if (state.activeSub === i) state.activeSub = null;
+  else if (state.activeSub != null && state.activeSub > i) state.activeSub--;
+  renderSubclips();
+}
+
+function renderSubclips() { renderSubBar(); renderSubList(); }
+
+function renderSubBar() {
+  const track = $('#subclip-track'); if (!track) return;
+  const dur = subDur() || 1;
+  track.innerHTML = state.subclips.map((sc, i) => {
+    const left = (sc.start / dur) * 100;
+    const width = Math.max(2, ((sc.end - sc.start) / dur) * 100);
+    const active = i === state.activeSub ? ' active' : '';
+    return `<div class="subclip-block${active}" data-i="${i}" style="left:${left}%;width:${width}%" title="${sc.name}: ${sc.start.toFixed(1)}–${sc.end.toFixed(1)}s — click to load, drag to move, edges to resize">
+      <span class="subclip-handle l"></span>
+      <span class="subclip-lbl">${i + 1}. ${sc.name}</span>
+      <span class="subclip-handle r"></span>
+    </div>`;
+  }).join('') || '<span class="subclip-empty">No sub-clips yet — frame the boxes, set a range, then "+ Add sub-clip". Each one renders to its own file.</span>';
+}
+
+function renderSubList() {
+  const ol = $('#subclip-list'); if (!ol) return;
+  if (!state.subclips.length) { ol.innerHTML = ''; return; }
+  ol.innerHTML = state.subclips.map((sc, i) => `
+    <li class="${i === state.activeSub ? 'active' : ''}">
+      <input class="subclip-name" data-i="${i}" value="${(sc.name || '').replace(/"/g, '')}" title="output filename for this sub-clip">
+      <span class="subclip-when">${sc.start.toFixed(1)}–${sc.end.toFixed(1)}s · ${(sc.end - sc.start).toFixed(1)}s</span>
+      <button class="ill-it-seek" data-load="${i}" title="load into the editor">✎</button>
+      <button class="ill-it-del danger" data-del="${i}" title="delete sub-clip">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.subclip-name').forEach(inp => inp.addEventListener('change', () => {
+    const sc = state.subclips[+inp.dataset.i]; if (sc) { sc.name = inp.value.trim() || sc.name; renderSubBar(); }
+  }));
+  ol.querySelectorAll('[data-load]').forEach(b => b.addEventListener('click', () => loadSubclip(+b.dataset.load)));
+  ol.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteSubclip(+b.dataset.del)));
+}
+
+function onSubTrackDown(e) {
+  const block = e.target.closest('.subclip-block'); if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  const rect = $('#subclip-track').getBoundingClientRect();
+  const br = block.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('subclip-handle')) mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  else if ((e.clientX - br.left) < 10) mode = 'resize-l';
+  else if ((br.right - e.clientX) < 10) mode = 'resize-r';
+  state.subDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: state.subclips[i].start, b: state.subclips[i].end, moved: false };
+}
+
+function onSubDragMove(e) {
+  const d = state.subDrag; if (!d) return;
+  if (Math.abs(e.clientX - d.startX) > 3) d.moved = true;
+  const dur = subDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const sc = state.subclips[d.i]; if (!sc) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    sc.start = +ns.toFixed(2); sc.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    sc.start = +Math.max(0, Math.min(d.a + dt, sc.end - 0.2)).toFixed(2);
+  } else {
+    sc.end = +Math.max(sc.start + 0.2, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderSubBar();
+}
+
+function buildSubRenderBody(sc, withWords) {
+  const s = sc.snap;
+  return {
+    job_id: state.jobId,
+    title: sc.name,
+    box1: (s.keyframes[1] || []).length ? s.keyframes[1] : null,
+    box2: (s.keyframes[2] || []).length ? s.keyframes[2] : null,
+    words: withWords ? state.words : [],
+    caption_font: s.caption.font,
+    caption_size: s.caption.size,
+    caption_style: s.caption.style || 'color',
+    caption_color: s.caption.color || 'yellow',
+    cleanup: false,
+    render_start: sc.start,
+    render_end: sc.end,
+    sfx: s.sfx || [],
+    illustrations: (s.ills || []).map(c => ({ t_start: c.t_start, t_end: c.t_end, url: c.url, target: c.target || 'full', fit: c.fit || 'cover' })),
+    keep_segments: (s.keep || []).map(w => ({ start: w.start, end: w.end })),
+    grow_segments: (s.grow || []).map(g => ({ start: g.start, end: g.end, top_frac: g.top_frac, ramp: g.ramp || 0 })),
+    zoom_segments: (s.zoom || []).map(z => ({ start: z.start, end: z.end, zoom: +z.zoom || 1.4, ramp: +z.ramp || 1.5 })),
+    combo_segments: (s.combo || []).map(c => ({ start: c.start, end: c.end, top_frac: c.top_frac || 0.4375, zoom: +c.zoom || 1.4, ramp: +c.ramp || 1.5 })),
+  };
+}
+
+async function renderAllSubclips() {
+  if (!state.subclips.length) { setStatus('tr-status', 'No sub-clips — add some first.', 'err'); return; }
+  const names = state.subclips.map(s => s.name);
+  if (new Set(names).size !== names.length) { setStatus('tr-status', 'Sub-clip names must be unique — they become filenames.', 'err'); return; }
+  const btn = $('#btn-sub-render'); if (btn) btn.disabled = true;
+  try {
+    if (!state.words.length) {
+      setStatus('tr-status', 'Transcribing once (Whisper)…');
+      try {
+        const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
+        state.words = tr.words; if (els.wordsBox) els.wordsBox.classList.remove('hidden'); renderWordChips();
+      } catch (e) { /* fall back to no-caption renders */ }
+    }
+    const withWords = state.words.length > 0;
+    const out = [];
+    for (let i = 0; i < state.subclips.length; i++) {
+      const sc = state.subclips[i];
+      setStatus('tr-status', `Rendering ${i + 1}/${state.subclips.length}: ${sc.name}…`);
+      try {
+        const r = await apiPost('/api/render', buildSubRenderBody(sc, withWords));
+        out.push({ name: sc.name, filename: r.filename, output_path: r.output_path });
+      } catch (e) {
+        out.push({ name: sc.name, error: e.message });
+      }
+      renderSubResults(out);
+    }
+    const ok = out.filter(o => !o.error).length;
+    setStatus('tr-status', `Done — ${ok}/${state.subclips.length} sub-clips rendered.`, ok ? 'ok' : 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderSubResults(out) {
+  const box = $('#subclip-results'); if (!box) return;
+  box.innerHTML = out.map(o => o.error
+    ? `<li class="err">${o.name}: ${o.error}</li>`
+    : `<li>${o.name} — <a href="${o.output_path}" download>↓ ${o.filename}</a></li>`).join('');
+}
+
+// Set the active export range from the Position playhead (Start/End buttons).
+function setSubRange(which, t) {
+  t = +(+t).toFixed(2);
+  if (which === 'start') { state.renderRange.start = t; if ($('#rd-start')) $('#rd-start').value = t; }
+  else { state.renderRange.end = t; if ($('#rd-end')) $('#rd-end').value = t; }
+  try { updateRangeMeta(); } catch (e) { /* */ }
+  updateSubRangeLbl();
+  setStatus('tr-status', `Range ${which} = ${t}s. Set both, then + Add sub-clip.`, 'ok');
+}
+
+function updateSubRangeLbl() {
+  const el = $('#subclip-range-lbl'); if (!el) return;
+  const s = state.renderRange.start, e = state.renderRange.end;
+  el.textContent = (s == null && e == null) ? 'range: full clip'
+    : `range: ${s == null ? '0' : s.toFixed(1)}–${e == null ? 'end' : e.toFixed(1)}s`;
 }
 
 function initTrimStep() {

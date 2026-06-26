@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +76,37 @@ def _client() -> OpenAI:
     if _client_singleton is None:
         _client_singleton = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=TIMEOUT)
     return _client_singleton
+
+
+_health = {"ok": None, "at": 0.0}
+_HEALTH_TTL = 20.0       # cache the up/down verdict (one probe per auto-box run)
+_HEALTH_TIMEOUT = 8.0    # short — the model is up, or it isn't (no waiting on a 504 cold-start)
+
+
+def healthy() -> bool:
+    """Cheap up/down probe of the vision endpoint (text-only completion, short
+    timeout, NO retries). Cached briefly. Lets callers SKIP boxing entirely when
+    the model is down (502 / unreachable) instead of treating every frame as
+    'subject absent' and filling the clip with black-gap keyframes."""
+    if not enabled():
+        return False
+    now = time.monotonic()
+    if _health["ok"] is not None and (now - _health["at"]) < _HEALTH_TTL:
+        return _health["ok"]
+    ok = False
+    try:
+        _client().with_options(timeout=_HEALTH_TIMEOUT, max_retries=0).chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": "ok"}],
+            max_tokens=1,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        ok = True
+    except Exception as e:  # noqa: BLE001 — any failure means down/unreachable
+        log.warning("vision.healthy() probe failed (model down/unreachable): %s", e)
+        ok = False
+    _health.update(ok=ok, at=now)
+    return ok
 
 
 # Built by concatenation (NOT str.format) so a user prompt containing { or } is safe.

@@ -675,6 +675,12 @@ def _predict_boxes(job: dict) -> None:
             return " ".join(s for s in (ctx, p) if s)
 
         notes = []
+        # If the vision endpoint is down, every detect would just miss → don't box
+        # at all (no black-gap track); the clip still goes READY so download +
+        # later steps aren't wasted, and the note tells the user to draw manually.
+        vis_ok = not (vision.enabled() and not vision.healthy())
+        if not vis_ok:
+            notes.append("vision model down — boxes skipped, draw manually")
         stp = job.get("step_seconds")
         p1m, p2m = merged(job.get("prompt1", "")), merged(job.get("prompt2", ""))
         # ONE shared layout timeline per clip — both boxes must agree on what
@@ -734,13 +740,13 @@ def _predict_boxes(job: dict) -> None:
         # probe are built on
         box1 = _predict_box(src, p1m, dur, padding=pad,
                             role="streamer", step=stp, segments=segs)
-        if job.get("prompt1") and not box1:
+        if job.get("prompt1") and not box1 and vis_ok:
             notes.append("box1: nothing detected")
         box2 = None
         if NUM_BOXES >= 2:
             box2 = _predict_box(src, p2m, dur, padding=pad,
                                 role="content", step=stp, segments=segs)
-            if job.get("prompt2") and not box2:
+            if job.get("prompt2") and not box2 and vis_ok:
                 notes.append("box2: nothing detected")
             if box1 and box2:
                 # both boxes gap at once = a fullscreen blip the probes couldn't

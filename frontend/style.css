@@ -1385,6 +1385,27 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .trim-block-handle.l { left: 0; right: auto; }
 .trim-block-handle.r { right: 0; left: auto; }
 
+/* ── Sub-clips (one session → many exports) ── */
+.subclip-panel { margin-top: 18px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.subclip-head h2 { margin: 0 0 4px; font-size: 15px; }
+.subclip-track { position: relative; height: 42px; margin: 12px 0; background: repeating-linear-gradient(45deg, #2a2a3340, #2a2a3340 6px, transparent 6px, transparent 12px), var(--bg-elev-2); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; user-select: none; }
+.subclip-empty { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--text-mute); font-style: italic; }
+.subclip-block { position: absolute; top: 3px; bottom: 3px; background: rgba(232,255,58,.18); border: 1px solid var(--accent, #e8ff3a); border-radius: 3px; cursor: grab; min-width: 14px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.subclip-block.active { background: rgba(232,255,58,.34); box-shadow: 0 0 0 1px var(--accent, #e8ff3a) inset; }
+.subclip-lbl { font-size: 10px; color: #f7ffce; pointer-events: none; white-space: nowrap; padding: 0 6px; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+.subclip-handle { position: absolute; top: 0; bottom: 0; width: 8px; background: var(--accent, #e8ff3a); cursor: ew-resize; opacity: .65; z-index: 2; }
+.subclip-handle.l { left: 0; } .subclip-handle.r { right: 0; }
+.subclip-pv-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.subclip-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.subclip-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.subclip-list li { display: flex; gap: 8px; align-items: center; padding: 6px 8px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 6px; }
+.subclip-list li.active { border-color: var(--accent, #e8ff3a); }
+.subclip-name { flex: 1; min-width: 80px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+.subclip-when { font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.subclip-results { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.subclip-results li { color: var(--text-mute); } .subclip-results li.err { color: #ff6b6b; }
+.subclip-results a { color: var(--accent, #e8ff3a); }
+
 /* illustration: preview + per-cutaway target/fit */
 .ill-stage-row { display: flex; gap: 12px; align-items: flex-start; }
 .ill-stage-row .ill-stage { flex: 1; min-width: 0; }

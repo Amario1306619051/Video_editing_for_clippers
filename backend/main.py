@@ -192,10 +192,14 @@ def api_autobox(req: AutoBoxRequest):
     kfs = out["keyframes"]
     cap_note = (f" (range long — sampled every {out['step']}s, capped at {out['sampled']} frames)"
                 if out.get("capped") else "")
-    msg = (f"Detected '{req.prompt.strip()}' in {out['detected']}/{out['sampled']} frames"
-           f" (every {out['step']}s).{cap_note}"
-           if kfs else
-           f"No '{req.prompt.strip()}' found in {out['sampled']} frames — try a different prompt or range.")
+    if out.get("vision_down"):
+        msg = ("Vision model is down / unreachable — auto-box skipped (no box drawn). "
+               "Draw the box manually, or try again once it's back up.")
+    else:
+        msg = (f"Detected '{req.prompt.strip()}' in {out['detected']}/{out['sampled']} frames"
+               f" (every {out['step']}s).{cap_note}"
+               if kfs else
+               f"No '{req.prompt.strip()}' found in {out['sampled']} frames — try a different prompt or range.")
     return {"keyframes": kfs, "sampled": out["sampled"], "detected": out["detected"],
             "message": msg, "director_note": out.get("director_note", "")}
 

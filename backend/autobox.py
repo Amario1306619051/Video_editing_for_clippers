@@ -1026,6 +1026,8 @@ def detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: i
     share it (independent per-box probing can disagree — e.g. box1 calling a
     stretch fullscreen-webcam while box2 calls it fullscreen-content → both
     boxes real at once and the reel shows the same frame twice)."""
+    if vision.enabled() and not vision.healthy():
+        return []   # vision down → no layout probing; predict_track also no-ops
     segs = _detect_layout_segments(source_path, t0, t1, w, h, min_gap=min_gap)
     # Boundary LEAD: a switch detected at the first frame that already shows the
     # new layout lands a touch LATE (the box holds the old framing into the new
@@ -1982,7 +1984,7 @@ def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
     `box1_desc` (who/what box1 is — appended to box1's prompt by predict_track).
     Returns (segments, note). segments == [] when the director produced nothing
     (the caller then falls back to the geometric segmenter / single segment)."""
-    if not vision.enabled() or t1 <= t0:
+    if not vision.enabled() or t1 <= t0 or not vision.healthy():
         return [], ""
     words = words or []
     turns = turns or []
@@ -2201,6 +2203,16 @@ def predict_track(
     step = max(0.2, float(step_seconds or 0.2))
     if t1 <= t0:
         t1 = min(t0 + step, dur or t0 + step)
+
+    # Preflight: if the vision endpoint is down/unreachable, SKIP boxing entirely —
+    # emit NO keyframes (don't treat every frame as 'absent' and fill the clip with
+    # black-gap keyframes). The rest of the pipeline carries on (manual draw / render).
+    if vision.enabled() and not vision.healthy():
+        log.warning("vision endpoint down — auto-box skipped, no boxes emitted")
+        return {"keyframes": [], "sampled": 0, "detected": 0, "width": w, "height": h,
+                "step": round(step, 2), "capped": False, "side": None,
+                "segments": [], "director_note": "", "vision_down": True}
+
     times, eff_step, capped = _sample_times(t0, t1, max(step, 1.0))
 
     # Layout/side resolution per SEGMENT (the model needs concrete anchors —
