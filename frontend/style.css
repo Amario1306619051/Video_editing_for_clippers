@@ -1475,3 +1475,22 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .segmenter-panel textarea { font-family: ui-monospace, monospace; resize: vertical; }
 .segmenter-panel.hidden { display: none; }
 .segmenter-panel .hidden { display: none; }
+
+/* ── Text overlays (Trim step) ────────────────────────────────────────── */
+.ovl-editor { margin: 8px 0 4px; padding: 10px; border: 1px solid var(--line, #2a2a2a); border-radius: 8px; background: rgba(255,255,255,0.02); }
+.ovl-editor textarea { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; margin-bottom: 8px; }
+.ovl-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.ovl-row label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.ovl-row label > span { opacity: 0.7; }
+.ovl-row input[type=number] { width: 64px; }
+.ovl-row input[type=color] { width: 42px; height: 28px; padding: 0; border: none; background: none; cursor: pointer; }
+.ovl-pos-wrap { display: flex; flex-direction: column; gap: 3px; }
+.ovl-lbl { font-size: 11px; opacity: 0.7; }
+.ovl-grid { display: grid; grid-template-columns: repeat(3, 22px); grid-template-rows: repeat(3, 22px); gap: 2px; }
+.ovl-grid button { padding: 0; border: 1px solid var(--line, #2a2a2a); background: rgba(255,255,255,0.03); color: inherit; border-radius: 3px; cursor: pointer; font-size: 12px; line-height: 1; }
+.ovl-grid button:hover { background: rgba(232,255,58,0.15); }
+.ovl-grid button.active { background: #E8FF3A; color: #111; border-color: #E8FF3A; }
+.trim-block.ovl-block.sel { outline: 2px solid #E8FF3A; outline-offset: 1px; }
+.stk-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--line, #2a2a2a); border-radius: 4px; background: repeating-conic-gradient(#2a2a2a 0% 25%, #1a1a1a 0% 50%) 50% / 12px 12px; }
+.ovl-row input[type=range] { width: 90px; }
+.trim-block.stk-block.sel { outline: 2px solid #E8FF3A; outline-offset: 1px; }

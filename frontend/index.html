@@ -6,8 +6,8 @@
 <title>CLIPPER</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260625e">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Archivo+Black&family=Poppins:wght@700&family=Fjalla+One&family=Bangers&family=Titan+One&family=Alfa+Slab+One&family=Oswald:wght@500;600&family=Bungee&family=Righteous&family=Luckiest+Guy&family=Permanent+Marker&family=Pacifico&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=20260629f">
 </head>
 <body>
 <header class="topbar">
@@ -418,6 +418,12 @@
             <select id="cap-font">
               <option>Anton</option>
               <option>Bebas Neue</option>
+              <option>Archivo Black</option>
+              <option>Poppins</option>
+              <option>Fjalla One</option>
+              <option>Bangers</option>
+              <option>Titan One</option>
+              <option>Alfa Slab One</option><option>Oswald</option><option>Bungee</option><option>Righteous</option><option>Luckiest Guy</option><option>Permanent Marker</option><option>Pacifico</option>
               <option>Bricolage Grotesque</option>
               <option>JetBrains Mono</option>
               <option>Inter</option>
@@ -442,6 +448,14 @@
               <option value="yellow">Yellow</option>
               <option value="green">Green</option>
               <option value="blue">Blue</option>
+            </select>
+          </label>
+          <label>
+            <span>Position</span>
+            <select id="cap-pos" title="Default vertical caption position (override per time-window in the Trim step)">
+              <option value="top">Top</option>
+              <option value="middle" selected>Middle (slot edge)</option>
+              <option value="bottom">Bottom</option>
             </select>
           </label>
         </div>
@@ -552,6 +566,8 @@
             <label><span>Font</span>
               <select id="thumb-font">
                 <option>Anton</option><option>Bebas Neue</option><option>Bricolage Grotesque</option>
+                <option>Archivo Black</option><option>Poppins</option><option>Fjalla One</option>
+                <option>Bangers</option><option>Titan One</option><option>Alfa Slab One</option><option>Oswald</option><option>Bungee</option><option>Righteous</option><option>Luckiest Guy</option><option>Permanent Marker</option><option>Pacifico</option>
                 <option>JetBrains Mono</option><option>Impact</option><option>Arial</option>
               </select>
             </label>
@@ -725,7 +741,8 @@
       <aside class="ill-right">
         <div class="ill-search">
           <div class="ill-search-row">
-            <input type="text" id="ill-query" placeholder="search Pexels — e.g. money, city night, sad cat">
+            <select id="ill-source" title="Image source (copyright-free / royalty-free)"></select>
+            <input type="text" id="ill-query" placeholder="search — e.g. money, city night, sad cat">
             <button class="primary" id="btn-ill-search">Search</button>
           </div>
           <div class="ill-search-row">
@@ -789,6 +806,98 @@
       </div>
 
       <ol class="ill-list" id="trim-list"></ol>
+
+      <div class="trim-controls" style="margin-top:14px">
+        <span class="sfx-sub-head" style="margin:0 6px 0 0">Caption position over time</span>
+        <select id="cap-pos-new" title="Position for the next window you add">
+          <option value="top">Top</option>
+          <option value="middle">Middle</option>
+          <option value="bottom" selected>Bottom</option>
+        </select>
+        <button class="ghost" id="btn-cappos-a">◖ Set A</button>
+        <button class="ghost" id="btn-cappos-b">Set B (add) ◗</button>
+        <button class="ghost small" id="btn-cappos-clear" title="remove all windows">clear</button>
+        <span class="status" id="cappos-status"></span>
+      </div>
+      <div class="trim-track-wrap">
+        <div class="sfx-sub-head">Caption-position windows — drag to move/resize · outside them the caption uses the default (Render step) · <span id="cappos-info">none</span></div>
+        <div class="trim-track" id="cap-pos-track" title="caption sits top/middle/bottom inside each window"></div>
+      </div>
+      <ol class="ill-list" id="cap-pos-list"></ol>
+
+      <div class="trim-controls" style="margin-top:14px">
+        <span class="sfx-sub-head" style="margin:0 6px 0 0">Text overlays</span>
+        <button class="ghost" id="btn-ovl-add">+ Add text @ playhead</button>
+        <button class="ghost small" id="btn-ovl-clear" title="remove all overlays">clear</button>
+        <span class="status" id="ovl-status"></span>
+      </div>
+      <div class="ovl-editor" id="ovl-editor">
+        <textarea id="ovl-text" rows="2" placeholder="Select an overlay below (or add one), then type here — Enter for a new line"></textarea>
+        <div class="ovl-row">
+          <label><span>Font</span>
+            <select id="ovl-font">
+              <option>Anton</option>
+              <option>Bebas Neue</option>
+              <option>Archivo Black</option>
+              <option>Poppins</option>
+              <option>Fjalla One</option>
+              <option>Bangers</option>
+              <option>Titan One</option>
+              <option>Alfa Slab One</option><option>Oswald</option><option>Bungee</option><option>Righteous</option><option>Luckiest Guy</option><option>Permanent Marker</option><option>Pacifico</option>
+              <option>Bricolage Grotesque</option>
+              <option>JetBrains Mono</option>
+              <option>Inter</option>
+              <option>Arial</option>
+              <option>Impact</option>
+            </select>
+          </label>
+          <label><span>Size</span><input type="number" id="ovl-size" value="56" min="12" max="200"></label>
+          <label><span>Color</span><input type="color" id="ovl-color" value="#ffffff"></label>
+          <span class="ovl-pos-wrap"><span class="ovl-lbl">Position</span>
+            <div class="ovl-grid" id="ovl-grid" title="anchor the text">
+              <button data-x="0.2" data-y="0.12">↖</button><button data-x="0.5" data-y="0.12">↑</button><button data-x="0.8" data-y="0.12">↗</button>
+              <button data-x="0.2" data-y="0.5">←</button><button data-x="0.5" data-y="0.5">•</button><button data-x="0.8" data-y="0.5">→</button>
+              <button data-x="0.2" data-y="0.88">↙</button><button data-x="0.5" data-y="0.88">↓</button><button data-x="0.8" data-y="0.88">↘</button>
+            </div>
+          </span>
+          <button class="ghost" id="btn-ovl-a">◖ Set A</button>
+          <button class="ghost" id="btn-ovl-b">Set B ◗</button>
+        </div>
+      </div>
+      <div class="trim-track-wrap">
+        <div class="sfx-sub-head">Overlay windows — drag to move, drag either edge to resize · click one to edit · <span id="ovl-info">none</span></div>
+        <div class="trim-track" id="ovl-track"></div>
+      </div>
+      <ol class="ill-list" id="ovl-list"></ol>
+
+      <div class="trim-controls" style="margin-top:14px">
+        <span class="sfx-sub-head" style="margin:0 6px 0 0">PNG stickers</span>
+        <input type="file" id="stk-file" accept="image/png,image/webp,image/gif,image/jpeg" hidden>
+        <button class="ghost" id="btn-stk-upload">Upload PNG @ playhead</button>
+        <button class="ghost small" id="btn-stk-clear" title="remove all stickers">clear</button>
+        <span class="status" id="stk-status"></span>
+      </div>
+      <div class="ovl-editor" id="stk-editor">
+        <div class="ovl-row">
+          <img id="stk-thumb" class="stk-thumb" alt="sticker">
+          <label><span>Size</span><input type="range" id="stk-scale" min="0.05" max="1" step="0.01" value="0.3"></label>
+          <label><span>Opacity</span><input type="range" id="stk-opacity" min="0.1" max="1" step="0.05" value="1"></label>
+          <span class="ovl-pos-wrap"><span class="ovl-lbl">Position</span>
+            <div class="ovl-grid" id="stk-grid" title="anchor the sticker">
+              <button data-x="0.15" data-y="0.12">↖</button><button data-x="0.5" data-y="0.12">↑</button><button data-x="0.85" data-y="0.12">↗</button>
+              <button data-x="0.15" data-y="0.5">←</button><button data-x="0.5" data-y="0.5">•</button><button data-x="0.85" data-y="0.5">→</button>
+              <button data-x="0.15" data-y="0.88">↙</button><button data-x="0.5" data-y="0.88">↓</button><button data-x="0.85" data-y="0.88">↘</button>
+            </div>
+          </span>
+          <button class="ghost" id="btn-stk-a">◖ Set A</button>
+          <button class="ghost" id="btn-stk-b">Set B ◗</button>
+        </div>
+      </div>
+      <div class="trim-track-wrap">
+        <div class="sfx-sub-head">Sticker windows — drag to move, drag either edge to resize · click one to edit · <span id="stk-info">none</span></div>
+        <div class="trim-track" id="stk-track"></div>
+      </div>
+      <ol class="ill-list" id="stk-list"></ol>
     </div>
 
     <div class="transcript-edit-block">
@@ -813,6 +922,6 @@
 
 </div>
 
-<script src="app.js?v=20260625e"></script>
+<script src="app.js?v=20260629f"></script>
 </body>
 </html>

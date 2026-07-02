@@ -46,7 +46,7 @@ import render_remote
 import renderer
 import transcriber
 import vision
-from models import ComboSegment, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Word, ZoomSegment
+from models import CaptionPosRange, ComboSegment, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Sticker, TextOverlay, Word, ZoomSegment
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ _JOB_COLS = [
     "qc_score", "qc_issues", "thumbnail",
     # per-clip edits from the Sound / Illustration / Trim / Render steps (JSON blobs)
     "sfx", "illustrations", "keep_segments", "caption", "grow_segments",
-    "zoom_segments", "combo_segments",
+    "zoom_segments", "combo_segments", "caption_pos_ranges", "text_overlays", "stickers",
 ]
 
 
@@ -172,6 +172,9 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN grow_segments TEXT",
                     "ALTER TABLE jobs ADD COLUMN zoom_segments TEXT",
                     "ALTER TABLE jobs ADD COLUMN combo_segments TEXT",
+                    "ALTER TABLE jobs ADD COLUMN caption_pos_ranges TEXT",
+                    "ALTER TABLE jobs ADD COLUMN text_overlays TEXT",
+                    "ALTER TABLE jobs ADD COLUMN stickers TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -455,7 +458,8 @@ def save_job(key: str, patch: dict) -> Optional[dict]:
     allowed = {k: patch[k] for k in
                ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
                 "thumbnail", "sfx", "illustrations", "keep_segments", "caption", "transcript",
-                "grow_segments", "zoom_segments", "combo_segments")
+                "grow_segments", "zoom_segments", "combo_segments", "caption_pos_ranges",
+                "text_overlays", "stickers")
                if k in patch}
     if not allowed:
         return _find(key)
@@ -943,6 +947,10 @@ def _render_one(job: dict) -> None:
     cap_size = int(cap.get("size") or CAPTION_SIZE)
     cap_style = cap.get("style") or "color"     # 'color' | 'highlight'
     cap_color = cap.get("color") or "yellow"    # yellow | green | blue
+    cap_pos = cap.get("pos") or "middle"        # top | middle | bottom (default)
+    cap_pos_ranges = [CaptionPosRange(**r) for r in _pj(job.get("caption_pos_ranges"), []) if isinstance(r, dict)]
+    text_overlays = [TextOverlay(**t) for t in _pj(job.get("text_overlays"), []) if isinstance(t, dict)]
+    stickers = [Sticker(**s) for s in _pj(job.get("stickers"), []) if isinstance(s, dict)]
     # Intro card (lives inside the saved thumbnail config). When enabled, the
     # frontend uploaded temp/{job}_intro.png on ▶; _prepend_intro applies the
     # transition (incl. crumple + its SFX) and is a no-op if the PNG is missing.
@@ -961,10 +969,12 @@ def _render_one(job: dict) -> None:
     filename = f"{renderer._slugify(title)}_{job['job_id']}.mp4"
 
     # OFFLOAD to a remote GPU box when one is configured + free → renders fan out in
-    # parallel across the boxes. SFX needs the soundboard audio files (only on this
-    # box), so SFX clips always render locally. A remote miss (all boxes busy/down/
-    # errored) returns None and falls through to the local render below.
-    if render_remote.enabled() and not sfx:
+    # parallel across the boxes. SFX needs the soundboard audio files, and stickers /
+    # uploaded cutaways are user files that live ONLY on this box — all of those force
+    # a LOCAL render. A remote miss (all boxes busy/down/errored) returns None and
+    # falls through to the local render below.
+    _local_assets = bool(stickers) or any((getattr(c, "url", "") or "").startswith("/temp/") for c in ills)
+    if render_remote.enabled() and not sfx and not _local_assets:
         params = {
             "title": title,
             "box1": b1 or None,
@@ -974,6 +984,10 @@ def _render_one(job: dict) -> None:
             "caption_size": cap_size,
             "caption_style": cap_style,
             "caption_color": cap_color,
+            "caption_pos": cap_pos,
+            "caption_pos_ranges": [r.model_dump() for r in cap_pos_ranges],
+            "text_overlays": [t.model_dump() for t in text_overlays],
+            "stickers": [s.model_dump() for s in stickers],
             "keep_segments": [k.model_dump() for k in keep],
             "grow_segments": [g.model_dump() for g in grow],
             "zoom_segments": [z.model_dump() for z in zoom],
@@ -1017,6 +1031,8 @@ def _render_one(job: dict) -> None:
                 box1=kf1, box2=kf2, words=words,
                 caption_font=cap_font, caption_size=cap_size,
                 caption_style=cap_style, caption_color=cap_color,
+                caption_pos=cap_pos, caption_pos_ranges=cap_pos_ranges or None,
+                text_overlays=text_overlays or None, stickers=stickers or None,
                 keep_segments=keep or None, sfx=sfx or None, illustrations=ills or None,
                 intro=intro, grow_segments=grow or None, zoom_segments=zoom or None,
                 combo_segments=combo or None,

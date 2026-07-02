@@ -14,6 +14,7 @@ import autobox
 import batchqueue as batch_queue
 import diarize
 import downloader
+import imagesources
 import pexels
 import renderer
 import segmenter
@@ -132,6 +133,10 @@ def api_render(req: RenderRequest):
             caption_size=req.caption_size,
             caption_style=req.caption_style,
             caption_color=req.caption_color,
+            caption_pos=req.caption_pos,
+            caption_pos_ranges=req.caption_pos_ranges,
+            text_overlays=req.text_overlays,
+            stickers=req.stickers,
             render_start=req.render_start,
             render_end=req.render_end,
             sfx=req.sfx,
@@ -225,7 +230,8 @@ def api_capabilities():
     headline ideas)."""
     return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled(),
             "pexels": pexels.enabled(), "tts": tts.enabled(),
-            "diarize": diarize.enabled(), "segment": segmenter.enabled()}
+            "diarize": diarize.enabled(), "segment": segmenter.enabled(),
+            "image_sources": imagesources.available()}
 
 
 @app.post("/api/cleanup")
@@ -361,9 +367,10 @@ def api_queue_delete(key: str):
 # ───────────────────────── soundboard ─────────────────────────
 @app.post("/api/search", response_model=SearchResponse)
 def api_search(req: SearchRequest):
-    """Pexels image search for the manual illustration cutaways (Step Illustration)."""
+    """Multi-source image search for the illustration cutaways (Step Illustration):
+    Pexels / Openverse / Wikimedia / Unsplash / Pixabay (per req.source)."""
     try:
-        candidates = pexels.search(req.query)
+        candidates = imagesources.search(req.query, source=req.source)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"candidates": candidates}
@@ -519,12 +526,19 @@ def api_sb_audio(sid: str):
     return FileResponse(p, media_type=soundboard.media_type(sid))
 
 
+_TEMP_MEDIA = {
+    ".mp4": "video/mp4", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+
 @app.get("/temp/{name}")
 def serve_temp(name: str):
     p = TEMP_DIR / name
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(p, media_type="video/mp4")
+    return FileResponse(p, media_type=_TEMP_MEDIA.get(p.suffix.lower(), "application/octet-stream"))
 
 
 @app.get("/output/{name}")

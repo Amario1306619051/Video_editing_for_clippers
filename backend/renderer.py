@@ -185,6 +185,35 @@ def _ass_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
+def _overlay_dialogues(text_overlays, rs: float, re_: Optional[float]) -> list[str]:
+    """Styled text overlays → ASS Dialogue lines (reuse the Caption style with full
+    inline overrides so they don't depend on the karaoke styling). Times are rebased
+    onto the render timeline (the same rs the captions/words used; keep-trim → rs=0,
+    burned before the select so re-timing stays correct). Position = fractional
+    center via \\an5 + \\pos. Skips overlays that fall entirely outside the range."""
+    lines: list[str] = []
+    for o in (text_overlays or []):
+        a = float(getattr(o, "start", 0.0)) - rs
+        b = float(getattr(o, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        raw = str(getattr(o, "text", "") or "")
+        if not raw.strip():
+            continue
+        txt = _ass_escape(raw).replace("\r\n", "\\N").replace("\n", "\\N")
+        x = int(max(0.0, min(1.0, float(getattr(o, "x_frac", 0.5)))) * OUT_W)
+        y = int(max(0.0, min(1.0, float(getattr(o, "y_frac", 0.5)))) * OUT_H)
+        size = max(12, int(getattr(o, "size", 56) or 56))
+        font = getattr(o, "font", "Anton") or "Anton"
+        color = to_ass_color(getattr(o, "color", "#FFFFFF") or "#FFFFFF")
+        ov = (f"{{\\an5\\pos({x},{y})\\fn{font}\\fs{size}\\1c{color}"
+              f"\\bord{max(2, size // 16)}\\shad2}}")
+        lines.append(
+            f"Dialogue: 0,{_fmt_ass_time(a)},{_fmt_ass_time(b)},Caption,,0,0,0,,{ov}{txt}")
+    return lines
+
+
 def _build_ass(groups: list[dict], font: str, size: int, caption_y_for,
                style: str = "color", color: str = "yellow") -> str:
     """`caption_y_for` is either an int (single y for all groups) or a callable
@@ -1224,6 +1253,10 @@ def render(
     caption_size: int = 64,
     caption_style: str = "color",      # 'color' (recolor word) | 'highlight' (box)
     caption_color: str = "yellow",     # yellow | green | blue
+    caption_pos: str = "middle",       # default: "top" | "middle" (slot boundary) | "bottom"
+    caption_pos_ranges: Optional[list] = None,  # per-window caption-pos overrides
+    text_overlays: Optional[list] = None,       # styled text labels over time windows
+    stickers: Optional[list] = None,            # PNG stickers over time windows
 
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
@@ -1310,10 +1343,10 @@ def render(
     zoom_active = both and bool(zoom_segments)
     zoom_expr = _zoom_factor_expr(zoom_segments or []) if zoom_active else "1"
 
-    def _caption_y_for(t: float) -> int:
-        # Single-box layout for the whole clip → center. Two-box vstack →
-        # slot boundary (which RISES when the top slot grows), except when a
-        # layout-switch interval covers this caption time → single-mode here too.
+    def _boundary_y(t: float) -> int:
+        # The normal "middle" position: single-box layout (whole clip OR a
+        # layout-switch interval) → frame center; two-box vstack → slot boundary
+        # (which RISES when the top slot grows).
         if not both:
             return OUT_H // 2
         for t0, t1 in single_intervals:
@@ -1321,10 +1354,37 @@ def render(
                 return OUT_H // 2
         return int(round(_grow_h_at(grow_segments or [], src_dur, t))) if grow_active else TOP_H
 
+    def _pos_y(p: str, t: float) -> int:
+        # "top"/"bottom" pin to fixed heights; "middle" = the dynamic boundary.
+        p = (p or "middle").lower()
+        if p == "top":
+            return int(OUT_H * 0.13)
+        if p == "bottom":
+            return int(OUT_H * 0.87)
+        return _boundary_y(t)
+
+    # Per-window caption-position overrides, rebased onto the render timeline
+    # (the same rs the captions/words used; with keep-trim rs=0 → original time).
+    _cpr: list[tuple[float, float, str]] = []
+    for r in (caption_pos_ranges or []):
+        a = float(getattr(r, "start", 0.0)) - rs
+        b = float(getattr(r, "end", 0.0)) - rs
+        if b > 0.0 and (re_ is None or a < (re_ - rs)):
+            _cpr.append((max(0.0, a), b, getattr(r, "pos", "middle")))
+
+    def _caption_y_for(t: float) -> int:
+        for a, b, p in _cpr:
+            if a <= t < b:
+                return _pos_y(p, t)
+        return _pos_y(caption_pos, t)
+
     # Build ASS subtitles
     groups = _group_words(words) if words else []
     ass_text = _build_ass(groups, caption_font, caption_size, _caption_y_for,
                           style=caption_style, color=caption_color)
+    overlay_lines = _overlay_dialogues(text_overlays, rs, re_)
+    if overlay_lines:
+        ass_text = ass_text.rstrip("\n") + "\n" + "\n".join(overlay_lines) + "\n"
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
@@ -1437,6 +1497,44 @@ def render(
         )
         last = nxt
 
+    # PNG stickers (alpha) — free-positioned, scaled by width, overlaid over their
+    # window ON TOP of the cutaways (captions/overlays still burn on top of these).
+    # Resolved + rebased onto the render timeline; inputs come AFTER the cutaway
+    # images (indices 1+N .. 1+N+M-1), before the SFX inputs.
+    stk_entries: list[tuple] = []   # (path, a, b, sticker)
+    for s in (stickers or []):
+        a = float(getattr(s, "start", 0.0)) - rs
+        b = float(getattr(s, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        if re_ is not None:
+            b = min(b, re_ - rs)
+        if b <= a:
+            continue
+        try:
+            sp = pexels.download_pick(job_id, getattr(s, "url", "") or "")
+        except Exception:  # noqa: BLE001 — a missing sticker file must not kill the render
+            continue
+        stk_entries.append((sp, a, b, s))
+    n_img = len(img_inputs)
+    for k, (sp, a, b, s) in enumerate(stk_entries):
+        si = 1 + n_img + k
+        w = max(2, int((float(getattr(s, "scale", 0.3)) or 0.3) * OUT_W))
+        op = float(getattr(s, "opacity", 1.0) or 1.0)
+        chain = f"[{si}:v]scale={w}:-2:flags=lanczos,format=rgba"
+        if op < 0.999:
+            chain += f",colorchannelmixer=aa={max(0.0, min(1.0, op)):.3f}"
+        parts.append(f"{chain}[stk{k}]")
+        xf = _fmt_num(max(0.0, min(1.0, float(getattr(s, 'x_frac', 0.5)))))
+        yf = _fmt_num(max(0.0, min(1.0, float(getattr(s, 'y_frac', 0.5)))))
+        nxt = f"bstk{k}"
+        parts.append(
+            f"[{last}][stk{k}]overlay=x='{xf}*W-w/2':y='{yf}*H-h/2':"
+            f"enable='between(t,{_fmt_num(a)},{_fmt_num(b)})':eof_action=pass[{nxt}]"
+        )
+        last = nxt
+
     # Normalize to a constant frame rate before captions / keep-trim. The crop
     # chains mix sources at DIFFERENT rates — the segmented (size-varying) path
     # builds its slot on a `color` base at OUT_FPS, while the expression / blur
@@ -1451,9 +1549,10 @@ def render(
     # Subtitle path escape — Windows drive letters break filter parsing
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
     fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
-    if groups:
+    if groups or overlay_lines:
         # fontsdir → libass uses the bundled Anton/Bebas Neue instead of a
         # generic host-font fallback (which made captions look plain).
+        # (overlay_lines burn through the same pass even when there's no caption.)
         parts.append(f"[{last}]subtitles={ass_path_escaped}:fontsdir={fonts_escaped}[outv]")
         vmap = "[outv]"
     else:
@@ -1464,7 +1563,7 @@ def render(
     has_audio = _probe_has_audio(source_path)
     out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
     sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
-        sfx, has_audio, out_dur, first_sfx_index=1 + len(img_inputs))
+        sfx, has_audio, out_dur, first_sfx_index=1 + len(img_inputs) + len(stk_entries))
     if sfx_parts:
         parts.extend(sfx_parts)
     audio_map = amap or "0:a?"
@@ -1510,6 +1609,12 @@ def render(
         win = max(0.1, float(pick.t_end) - float(pick.t_start))
         ill_inputs += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
                        "-framerate", "2", "-t", f"{win:.3f}", "-i", str(_p)]
+    # Sticker inputs follow the cutaway images (same still-image feeding).
+    stk_input_args: list[str] = []
+    for sp, a, b, _s in stk_entries:
+        win = max(0.1, b - a)
+        stk_input_args += ["-itsoffset", f"{a:.3f}", "-loop", "1",
+                           "-framerate", "2", "-t", f"{win:.3f}", "-i", str(sp)]
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -1522,6 +1627,7 @@ def render(
         *input_seek,
         "-i", str(source_path),
         *ill_inputs,
+        *stk_input_args,
         *sfx_inputs,
         "-filter_complex", filter_complex,
         "-map", vmap,

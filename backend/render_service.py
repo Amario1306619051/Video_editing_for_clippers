@@ -19,8 +19,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 import renderer
-from models import (ComboSegment, GrowSegment, IllustrationPick, IntroConfig,
-                    KeepSegment, Keyframe, Word, ZoomSegment)
+from models import (CaptionPosRange, ComboSegment, GrowSegment, IllustrationPick,
+                    IntroConfig, KeepSegment, Keyframe, Sticker, TextOverlay, Word, ZoomSegment)
 
 app = FastAPI()
 _busy = threading.Lock()        # serialize renders on this box (one at a time)
@@ -99,6 +99,10 @@ async def render_ep(
             caption_size=int(p.get("caption_size") or 64),
             caption_style=p.get("caption_style") or "color",
             caption_color=p.get("caption_color") or "yellow",
+            caption_pos=p.get("caption_pos") or "middle",
+            caption_pos_ranges=[CaptionPosRange(**r) for r in p.get("caption_pos_ranges", [])] or None,
+            text_overlays=[TextOverlay(**t) for t in p.get("text_overlays", [])] or None,
+            stickers=[Sticker(**s) for s in p.get("stickers", [])] or None,
             render_start=p.get("render_start"),
             render_end=p.get("render_end"),
             illustrations=[IllustrationPick(**c) for c in p.get("illustrations", [])] or None,

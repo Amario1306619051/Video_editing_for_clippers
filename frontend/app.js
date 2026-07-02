@@ -37,7 +37,7 @@ const state = {
   combo: [],                              // top-slot grow+zoom combo windows [{start,end,top_frac,zoom,ramp}]
   comboDrag: null,
   words: [],
-  caption: { font: 'Anton', size: 64, style: 'color', color: 'yellow' },  // must match the default <option> in index.html
+  caption: { font: 'Anton', size: 64, style: 'color', color: 'yellow', pos: 'middle' },  // must match the default <option> in index.html
   renderRange: { start: null, end: null },  // sub-range in seconds, null = open
   drag: null,
   abDrag: null,                          // 'start' | 'end' while dragging a range handle
@@ -55,6 +55,16 @@ const state = {
   keep: [],                               // keep-windows {start,end} (everything else cut at render)
   keepA: null,                            // pending in-point while marking A→B
   keepDrag: null,                         // drag state for a keep block
+  capPos: [],                             // caption-position windows {start,end,pos} (else default)
+  capPosA: null,                          // pending in-point while marking a cap-pos window
+  capPosDrag: null,                       // drag state for a cap-pos block
+  overlays: [],                           // text overlays {text,start,end,x_frac,y_frac,size,font,color}
+  ovlSel: null,                           // index of the overlay being edited in the controls
+  ovlA: null,                             // pending in-point while marking an overlay window
+  ovlDrag: null,                          // drag state for an overlay block
+  stickers: [],                           // PNG stickers {url,thumb,start,end,x_frac,y_frac,scale,opacity}
+  stkSel: null,                           // index of the sticker being edited
+  stkDrag: null,                          // drag state for a sticker block
   subclips: [],                           // sub-clips: one session → many exports [{name,start,end,snap}]
   activeSub: null,                        // index of the sub-clip currently loaded into the editor
   subDrag: null,                          // drag state for a sub-clip range bar
@@ -81,6 +91,15 @@ document.addEventListener('DOMContentLoaded', () => {
   els.capSize = $('#cap-size');
   els.capStyle = $('#cap-style');
   els.capColor = $('#cap-color');
+  els.capPos = $('#cap-pos');
+  els.ovlText = $('#ovl-text');
+  els.ovlFont = $('#ovl-font');
+  els.ovlSize = $('#ovl-size');
+  els.ovlColor = $('#ovl-color');
+  els.stkThumb = $('#stk-thumb');
+  els.stkScale = $('#stk-scale');
+  els.stkOpacity = $('#stk-opacity');
+  els.stkFile = $('#stk-file');
   els.dots1 = $('#dots-1');
   els.dots2 = $('#dots-2');
   els.cuts1 = $('#cuts-1');
@@ -330,6 +349,10 @@ document.addEventListener('DOMContentLoaded', () => {
     state.caption.color = els.capColor.value;
     try { autosaveQueue(); } catch (_) {}
   });
+  els.capPos && els.capPos.addEventListener('change', () => {
+    state.caption.pos = els.capPos.value;
+    try { autosaveQueue(); } catch (_) {}
+  });
 
   wireThumb();
   wireQueue();
@@ -355,12 +378,7 @@ async function initCapabilities() {
       if (g) g.disabled = true;
       setStatus('thumb-gen-status', 'AI ideas are off — no text model configured. You can still type your own headline.', 'err');
     }
-    if (!caps.pexels) {
-      const b = $('#btn-ill-search'), q = $('#ill-query');
-      if (b) b.disabled = true;
-      if (q) q.disabled = true;
-      setStatus('ill-status', 'Illustration search is off — set PEXELS_API_KEY in clipper/.env (same key as illustrator).', 'err');
-    }
+    populateImageSources(caps.image_sources || { pexels: !!caps.pexels });
     if (!caps.tts) {
       const vc = $('#th-intro-voice');
       if (vc) { vc.checked = false; vc.disabled = true; vc.closest('label').title = 'No TTS engine — install gTTS (pip install gTTS) or drop a Piper voice into clipper/voices/. Intro will be silent.'; }
@@ -374,6 +392,25 @@ async function initCapabilities() {
                d.closest('label').title = 'Diarization off — no pyannote/HF token. The director still decides box1 visually.'; }
     }
   } catch (e) { /* capabilities are best-effort; manual boxing + manual headline still work */ }
+}
+
+const IMG_SOURCE_LABELS = {
+  pexels: 'Pexels', openverse: 'Openverse (CC)', wikimedia: 'Wikimedia Commons',
+  unsplash: 'Unsplash', pixabay: 'Pixabay',
+};
+// Fill the illustration-source <select> with the sources the backend reports as
+// available (keyless ones are always there; keyed ones only when configured).
+function populateImageSources(avail) {
+  const sel = $('#ill-source');
+  const enabled = Object.keys(IMG_SOURCE_LABELS).filter(k => avail[k]);
+  if (sel) {
+    sel.innerHTML = enabled.map(k => `<option value="${k}">${IMG_SOURCE_LABELS[k]}</option>`).join('');
+  }
+  const any = enabled.length > 0;
+  const b = $('#btn-ill-search'), q = $('#ill-query');
+  if (b) b.disabled = !any;
+  if (q) q.disabled = !any;
+  if (!any) setStatus('ill-status', 'Image search off — no source available. Add PEXELS_API_KEY / UNSPLASH_API_KEY / PIXABAY_API_KEY, or use Import image.', 'err');
 }
 
 // ───────────────────────── step nav ─────────────────────────
@@ -936,6 +973,9 @@ function renderEverything() {
   try { renderSfxTrack(); renderSfxList(); } catch (e) { /* step UI not ready */ }
   try { renderIllTrack(); renderIllList(); } catch (e) { /* step UI not ready */ }
   try { renderTrimTrack(); renderTrimList(); } catch (e) { /* step UI not ready */ }
+  try { renderCapPosTrack(); renderCapPosList(); } catch (e) { /* step UI not ready */ }
+  try { renderOverlayTrack(); renderOverlayList(); } catch (e) { /* step UI not ready */ }
+  try { renderStickerTrack(); renderStickerList(); } catch (e) { /* step UI not ready */ }
   try { renderSubclips(); } catch (e) { /* step UI not ready */ }
   try { renderWordChips(); } catch (e) { /* no transcript */ }
   try { updateRangeMeta(); } catch (e) { /* */ }
@@ -2286,6 +2326,9 @@ async function doDownload() {
     state.sfx = [];                // placements are per-clip
     state.ills = [];               // cutaways are per-clip
     state.keep = []; state.keepA = null;  // keep-windows are per-clip
+    state.capPos = []; state.capPosA = null;  // caption-position windows are per-clip
+    state.overlays = []; state.ovlSel = null; state.ovlA = null;  // text overlays are per-clip
+    state.stickers = []; state.stkSel = null;  // stickers are per-clip
     state.grow = [];                       // top-slot grow windows are per-clip
     state.zoom = [];                       // top-slot zoom windows are per-clip
     state.combo = [];                      // top-slot grow+zoom windows are per-clip
@@ -2526,6 +2569,10 @@ function buildRenderBody(withWords) {
     caption_size: state.caption.size,
     caption_style: state.caption.style || 'color',
     caption_color: state.caption.color || 'yellow',
+    caption_pos: state.caption.pos || 'middle',
+    caption_pos_ranges: (state.capPos || []).map(w => ({ start: w.start, end: w.end, pos: w.pos })),
+    text_overlays: (state.overlays || []).map(o => ({ text: o.text, start: o.start, end: o.end, x_frac: o.x_frac, y_frac: o.y_frac, size: o.size, font: o.font, color: o.color })),
+    stickers: (state.stickers || []).map(s => ({ url: s.url, start: s.start, end: s.end, x_frac: s.x_frac, y_frac: s.y_frac, scale: s.scale, opacity: s.opacity })),
     cleanup: false,
     render_start: state.renderRange.start,
     render_end: state.renderRange.end,
@@ -3846,22 +3893,30 @@ async function openQueueJob(key) {
   state.sfx = _parse(job.sfx, []);                 // Sound step placements
   state.ills = _parse(job.illustrations, []);      // Illustration cutaways
   state.keep = _parse(job.keep_segments, []);      // Trim keep-windows
+  state.capPos = _parse(job.caption_pos_ranges, []);  // caption-position windows
+  state.capPosA = null;
+  state.overlays = _parse(job.text_overlays, []);  // text overlays
+  state.ovlSel = null; state.ovlA = null;
+  state.stickers = _parse(job.stickers, []);       // PNG stickers
+  state.stkSel = null;
   state.grow = _parse(job.grow_segments, []);      // top-slot grow windows
   state.zoom = _parse(job.zoom_segments, []);      // top-slot zoom windows
   state.combo = _parse(job.combo_segments, []);    // top-slot grow+zoom windows
   state.subclips = []; state.activeSub = null;     // sub-clips are per-session (not persisted yet)
-  const _cap = _parse(job.caption, null);          // caption font/size/style/color
-  state.caption.style = 'color'; state.caption.color = 'yellow';   // per-clip defaults
+  const _cap = _parse(job.caption, null);          // caption font/size/style/color/pos
+  state.caption.style = 'color'; state.caption.color = 'yellow'; state.caption.pos = 'middle';   // per-clip defaults
   if (_cap && typeof _cap === 'object') {
     if (_cap.font) state.caption.font = _cap.font;
     if (_cap.size) state.caption.size = Math.min(160, Math.max(24, +_cap.size || 64));
     if (_cap.style) state.caption.style = _cap.style;
     if (_cap.color) state.caption.color = _cap.color;
+    if (_cap.pos) state.caption.pos = _cap.pos;
     if (els.capFont) els.capFont.value = state.caption.font;
     if (els.capSize) els.capSize.value = state.caption.size;
   }
   if (els.capStyle) els.capStyle.value = state.caption.style;
   if (els.capColor) els.capColor.value = state.caption.color;
+  if (els.capPos) els.capPos.value = state.caption.pos || 'middle';
   resetThumbSlots();               // thumbnail backgrounds reference the old clip
   // Restore this clip's saved thumbnail (headline + style), if any.
   if (job.thumbnail) {
@@ -3911,7 +3966,7 @@ function queueSig() {
     p1: ($('#ab-prompt-1') ? $('#ab-prompt-1').value : ''),
     p2: ($('#ab-prompt-2') ? $('#ab-prompt-2').value : ''),
     th: thumbSettings(),
-    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption, grow: state.grow, zoom: state.zoom, combo: state.combo,
+    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption, capPos: state.capPos, ovl: state.overlays, stk: state.stickers, grow: state.grow, zoom: state.zoom, combo: state.combo,
   });
 }
 
@@ -3937,6 +3992,9 @@ async function autosaveQueue() {
       zoom_segments: JSON.stringify(state.zoom || []),
       combo_segments: JSON.stringify(state.combo || []),
       caption: JSON.stringify(state.caption || {}),
+      caption_pos_ranges: JSON.stringify(state.capPos || []),
+      text_overlays: JSON.stringify(state.overlays || []),
+      stickers: JSON.stringify(state.stickers || []),
     });
     setStatus('queue-status', 'Progress saved ✓', 'ok');
     // Keep the intro-card PNG in sync so a LATER batch / ▶ render (when this clip
@@ -4386,9 +4444,10 @@ async function doIllSearch() {
   if (!q) { setStatus('ill-status', 'Type something to search.', 'err'); return; }
   const btn = $('#btn-ill-search');
   if (btn) btn.disabled = true;
-  setStatus('ill-status', `Searching "${q}"…`);
+  const source = ($('#ill-source') && $('#ill-source').value) || undefined;
+  setStatus('ill-status', `Searching "${q}"${source ? ' · ' + source : ''}…`);
   try {
-    const res = await apiPost('/api/search', { query: q });
+    const res = await apiPost('/api/search', { query: q, source });
     renderIllCandidates(res.candidates || []);
     setStatus('ill-status', (res.candidates || []).length ? 'Click an image to drop a cutaway at the current time.' : 'No results.', (res.candidates || []).length ? 'ok' : 'err');
   } catch (e) {
@@ -4702,6 +4761,9 @@ function wireTrim() {
     const scr = $('#trim-scrubber'); if (scr) scr.max = v.duration || 0;
     const d = $('#trim-dur'); if (d) d.textContent = formatTime(v.duration || 0);
     renderTrimTrack();
+    renderCapPosTrack(); renderCapPosList();
+    renderOverlayTrack(); renderOverlayList();
+    renderStickerTrack(); renderStickerList();
     reapplySpeed('trim');
   });
   v.addEventListener('timeupdate', () => {
@@ -4721,6 +4783,9 @@ function wireTrim() {
     const t = $('#trim-time'); if (t) t.textContent = formatTime(v.currentTime || 0);
     const scr = $('#trim-scrubber'); if (scr && document.activeElement !== scr) scr.value = v.currentTime || 0;
     updateTrimCursor();
+    updateCapPosCursor();
+    updateOverlayCursor();
+    updateStickerCursor();
     drawTrimPreview();
   });
   v.addEventListener('loadeddata', drawTrimPreview);
@@ -4738,6 +4803,71 @@ function wireTrim() {
   $('#trim-track').addEventListener('mousedown', onTrimTrackDown);
   window.addEventListener('mousemove', onTrimDragMove);
   window.addEventListener('mouseup', () => { if (state.keepDrag) { state.keepDrag = null; renderTrimList(); } });
+
+  // Caption-position windows (share this step's scrubber)
+  const cpa = $('#btn-cappos-a'); if (cpa) cpa.addEventListener('click', setCapPosA);
+  const cpb = $('#btn-cappos-b'); if (cpb) cpb.addEventListener('click', setCapPosB);
+  const cpc = $('#btn-cappos-clear'); if (cpc) cpc.addEventListener('click', () => { state.capPos = []; state.capPosA = null; renderCapPosTrack(); renderCapPosList(); setStatus('cappos-status', 'Cleared — caption uses the default.', 'ok'); });
+  const cpt = $('#cap-pos-track'); if (cpt) cpt.addEventListener('mousedown', onCapPosTrackDown);
+  window.addEventListener('mousemove', onCapPosDragMove);
+  window.addEventListener('mouseup', () => { if (state.capPosDrag) { state.capPosDrag = null; renderCapPosList(); } });
+
+  // Text overlays (share this step's scrubber)
+  const oadd = $('#btn-ovl-add'); if (oadd) oadd.addEventListener('click', addOverlay);
+  const oclr = $('#btn-ovl-clear'); if (oclr) oclr.addEventListener('click', () => { state.overlays = []; state.ovlSel = null; state.ovlA = null; renderOverlayTrack(); renderOverlayList(); setStatus('ovl-status', 'Cleared.', 'ok'); });
+  if (els.ovlText) els.ovlText.addEventListener('input', () => editSelectedOverlay({ text: els.ovlText.value }));
+  if (els.ovlFont) els.ovlFont.addEventListener('change', () => editSelectedOverlay({ font: els.ovlFont.value }));
+  if (els.ovlSize) els.ovlSize.addEventListener('input', () => editSelectedOverlay({ size: Math.min(200, Math.max(12, +els.ovlSize.value || 56)) }));
+  if (els.ovlColor) els.ovlColor.addEventListener('input', () => editSelectedOverlay({ color: els.ovlColor.value }));
+  const grid = $('#ovl-grid');
+  if (grid) grid.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    editSelectedOverlay({ x_frac: +b.dataset.x, y_frac: +b.dataset.y });
+    syncOverlayControls();
+  });
+  const oa = $('#btn-ovl-a'); if (oa) oa.addEventListener('click', () => {
+    const o = state.overlays[state.ovlSel]; if (!o) { setStatus('ovl-status', 'Select or add an overlay first.', 'err'); return; }
+    const s = +_ovlPlayhead().toFixed(2);
+    editSelectedOverlay({ start: s, end: Math.max(o.end, s + 0.2) });
+    setStatus('ovl-status', 'Start set to playhead.', 'ok');
+  });
+  const ob = $('#btn-ovl-b'); if (ob) ob.addEventListener('click', () => {
+    const o = state.overlays[state.ovlSel]; if (!o) { setStatus('ovl-status', 'Select or add an overlay first.', 'err'); return; }
+    const e = +_ovlPlayhead().toFixed(2);
+    editSelectedOverlay({ end: e, start: Math.min(o.start, e - 0.2) });
+    setStatus('ovl-status', 'End set to playhead.', 'ok');
+  });
+  const ot = $('#ovl-track'); if (ot) ot.addEventListener('mousedown', onOverlayTrackDown);
+  window.addEventListener('mousemove', onOverlayDragMove);
+  window.addEventListener('mouseup', () => { if (state.ovlDrag) { state.ovlDrag = null; renderOverlayList(); } });
+
+  // PNG stickers (share this step's scrubber)
+  const sup = $('#btn-stk-upload'); if (sup) sup.addEventListener('click', uploadSticker);
+  if (els.stkFile) els.stkFile.addEventListener('change', onStickerFile);
+  const sclr = $('#btn-stk-clear'); if (sclr) sclr.addEventListener('click', () => { state.stickers = []; state.stkSel = null; renderStickerTrack(); renderStickerList(); if (els.stkThumb) els.stkThumb.src = ''; setStatus('stk-status', 'Cleared.', 'ok'); });
+  if (els.stkScale) els.stkScale.addEventListener('input', () => editSelectedSticker({ scale: +els.stkScale.value }));
+  if (els.stkOpacity) els.stkOpacity.addEventListener('input', () => editSelectedSticker({ opacity: +els.stkOpacity.value }));
+  const sgrid = $('#stk-grid');
+  if (sgrid) sgrid.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    editSelectedSticker({ x_frac: +b.dataset.x, y_frac: +b.dataset.y });
+    syncStickerControls();
+  });
+  const sa = $('#btn-stk-a'); if (sa) sa.addEventListener('click', () => {
+    const s = state.stickers[state.stkSel]; if (!s) { setStatus('stk-status', 'Upload or select a sticker first.', 'err'); return; }
+    const v = +_ovlPlayhead().toFixed(2);
+    editSelectedSticker({ start: v, end: Math.max(s.end, v + 0.2) });
+    setStatus('stk-status', 'Start set to playhead.', 'ok');
+  });
+  const sb = $('#btn-stk-b'); if (sb) sb.addEventListener('click', () => {
+    const s = state.stickers[state.stkSel]; if (!s) { setStatus('stk-status', 'Upload or select a sticker first.', 'err'); return; }
+    const v = +_ovlPlayhead().toFixed(2);
+    editSelectedSticker({ end: v, start: Math.min(s.start, v - 0.2) });
+    setStatus('stk-status', 'End set to playhead.', 'ok');
+  });
+  const st = $('#stk-track'); if (st) st.addEventListener('mousedown', onStickerTrackDown);
+  window.addEventListener('mousemove', onStickerDragMove);
+  window.addEventListener('mouseup', () => { if (state.stkDrag) { state.stkDrag = null; renderStickerList(); } });
 }
 
 function trimDur() {
@@ -4756,7 +4886,7 @@ function subSnapshot() {
     keyframes: state.keyframes,
     grow: state.grow, zoom: state.zoom, combo: state.combo,
     caption: state.caption,
-    sfx: state.sfx, ills: state.ills, keep: state.keep,
+    sfx: state.sfx, ills: state.ills, keep: state.keep, capPos: state.capPos, overlays: state.overlays, stickers: state.stickers,
   }));
 }
 
@@ -4765,12 +4895,16 @@ function subApply(snap) {   // load a snapshot back into the live editor for twe
   const c = (v) => JSON.parse(JSON.stringify(v));
   state.keyframes = c(snap.keyframes || { 1: [], 2: [] });
   state.grow = c(snap.grow || []); state.zoom = c(snap.zoom || []); state.combo = c(snap.combo || []);
-  state.caption = Object.assign({ font: 'Anton', size: 64, style: 'color', color: 'yellow' }, snap.caption || {});
+  state.caption = Object.assign({ font: 'Anton', size: 64, style: 'color', color: 'yellow', pos: 'middle' }, snap.caption || {});
   state.sfx = c(snap.sfx || []); state.ills = c(snap.ills || []); state.keep = c(snap.keep || []);
+  state.capPos = c(snap.capPos || []); state.capPosA = null;
+  state.overlays = c(snap.overlays || []); state.ovlSel = null; state.ovlA = null;
+  state.stickers = c(snap.stickers || []); state.stkSel = null;
   if (els.capFont) els.capFont.value = state.caption.font;
   if (els.capSize) els.capSize.value = state.caption.size;
   if (els.capStyle) els.capStyle.value = state.caption.style;
   if (els.capColor) els.capColor.value = state.caption.color;
+  if (els.capPos) els.capPos.value = state.caption.pos || 'middle';
   renderEverything();
 }
 
@@ -4897,6 +5031,10 @@ function buildSubRenderBody(sc, withWords) {
     caption_size: s.caption.size,
     caption_style: s.caption.style || 'color',
     caption_color: s.caption.color || 'yellow',
+    caption_pos: (s.caption && s.caption.pos) || 'middle',
+    caption_pos_ranges: (s.capPos || []).map(w => ({ start: w.start, end: w.end, pos: w.pos })),
+    text_overlays: (s.overlays || []).map(o => ({ text: o.text, start: o.start, end: o.end, x_frac: o.x_frac, y_frac: o.y_frac, size: o.size, font: o.font, color: o.color })),
+    stickers: (s.stickers || []).map(k => ({ url: k.url, start: k.start, end: k.end, x_frac: k.x_frac, y_frac: k.y_frac, scale: k.scale, opacity: k.opacity })),
     cleanup: false,
     render_start: sc.start,
     render_end: sc.end,
@@ -5144,5 +5282,410 @@ function renderTrimList() {
   }));
   ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
     state.keep.splice(+b.dataset.del, 1); renderTrimTrack(); renderTrimList();
+  }));
+}
+
+// ═══════════════════ Caption position windows (top/middle/bottom over time) ═══
+// Shares the Trim step's #trim-video scrubber for the playhead. Outside every
+// window the caption uses the default position (Render step).
+function _capPosColor(pos) { return pos === 'top' ? '#4FB0FF' : pos === 'bottom' ? '#46D369' : '#E8FF3A'; }
+
+function addCapPos(a, b, pos) {
+  const dur = trimDur() || 0;
+  a = Math.max(0, a);
+  if (dur) b = Math.min(b, dur);
+  if (b - a < TRIM_MIN) { setStatus('cappos-status', 'Window too short.', 'err'); return false; }
+  state.capPos.push({ start: +a.toFixed(2), end: +b.toFixed(2), pos: pos || 'bottom' });
+  state.capPos.sort((x, y) => x.start - y.start);
+  renderCapPosTrack(); renderCapPosList();
+  return true;
+}
+
+function setCapPosA() {
+  state.capPosA = els.trimVideo ? (els.trimVideo.currentTime || 0) : 0;
+  setStatus('cappos-status', `A = ${state.capPosA.toFixed(2)}s — scrub to the end, then "Set B".`, 'ok');
+}
+
+function setCapPosB() {
+  if (state.capPosA == null) { setStatus('cappos-status', 'Set A first.', 'err'); return; }
+  const b = els.trimVideo ? (els.trimVideo.currentTime || 0) : 0;
+  const pos = ($('#cap-pos-new') && $('#cap-pos-new').value) || 'bottom';
+  if (addCapPos(state.capPosA, b, pos)) {
+    setStatus('cappos-status', `Caption ${pos} ${state.capPosA.toFixed(1)}–${b.toFixed(1)}s.`, 'ok');
+    state.capPosA = null;
+  }
+}
+
+function renderCapPosTrack() {
+  const track = $('#cap-pos-track');
+  const info = $('#cappos-info');
+  if (info) info.textContent = state.capPos.length
+    ? `${state.capPos.length} window${state.capPos.length > 1 ? 's' : ''}`
+    : 'none';
+  if (!track) return;
+  const dur = trimDur() || 1;
+  track.innerHTML = state.capPos.map((w, i) => {
+    const left = (w.start / dur) * 100;
+    const width = Math.max(1, ((w.end - w.start) / dur) * 100);
+    return `<div class="trim-block" data-i="${i}" style="left:${left}%;width:${width}%;background:${_capPosColor(w.pos)}33;border-color:${_capPosColor(w.pos)}" title="Caption ${w.pos} ${w.start.toFixed(1)}–${w.end.toFixed(1)}s — drag to move, drag either edge to resize">
+      <span class="trim-block-handle l"></span>
+      <span class="trim-block-lbl">${w.pos} · ${(w.end - w.start).toFixed(1)}s</span>
+      <span class="trim-block-handle r"></span>
+    </div>`;
+  }).join('') + '<div class="ill-cursor" id="cappos-cursor"></div>';
+  updateCapPosCursor();
+}
+
+function updateCapPosCursor() {
+  const cur = $('#cappos-cursor');
+  if (!cur) return;
+  const dur = trimDur() || 1;
+  cur.style.left = ((els.trimVideo ? (els.trimVideo.currentTime || 0) : 0) / dur) * 100 + '%';
+}
+
+function onCapPosTrackDown(e) {
+  const block = e.target.closest('.trim-block');
+  if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  const rect = $('#cap-pos-track').getBoundingClientRect();
+  const br = block.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('trim-block-handle')) {
+    mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  } else if ((e.clientX - br.left) < 10) {
+    mode = 'resize-l';
+  } else if ((br.right - e.clientX) < 10) {
+    mode = 'resize-r';
+  }
+  state.capPosDrag = { i, mode, startX: e.clientX, trackW: rect.width,
+                       a: state.capPos[i].start, b: state.capPos[i].end };
+}
+
+function onCapPosDragMove(e) {
+  const d = state.capPosDrag;
+  if (!d) return;
+  const dur = trimDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const w = state.capPos[d.i];
+  if (!w) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    w.start = +ns.toFixed(2); w.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    w.start = +Math.max(0, Math.min(d.a + dt, w.end - TRIM_MIN)).toFixed(2);
+  } else {
+    w.end = +Math.max(w.start + TRIM_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderCapPosTrack();
+}
+
+function renderCapPosList() {
+  const ol = $('#cap-pos-list');
+  if (!ol) return;
+  if (!state.capPos.length) {
+    ol.innerHTML = '<li class="empty">No windows — caption uses the default position. Mark A→B to override a stretch.</li>';
+    return;
+  }
+  ol.innerHTML = state.capPos.map((w, i) => `
+    <li>
+      <span class="sfx-it-name">${w.pos[0].toUpperCase() + w.pos.slice(1)}</span>
+      <span class="ill-it-when">${w.start.toFixed(1)} → ${w.end.toFixed(1)}s · ${(w.end - w.start).toFixed(1)}s</span>
+      <button class="ill-it-seek" data-seek="${i}" title="seek to its start">▶</button>
+      <button class="ill-it-del danger" data-del="${i}" title="remove window">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
+    const w = state.capPos[+b.dataset.seek]; if (w && els.trimVideo) els.trimVideo.currentTime = w.start;
+  }));
+  ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
+    state.capPos.splice(+b.dataset.del, 1); renderCapPosTrack(); renderCapPosList();
+  }));
+}
+
+// ═══════════════════════ Text overlays (styled text at time windows) ══════════
+// Shares the Trim step's #trim-video scrubber. The text/font/size/color/position
+// controls edit the SELECTED overlay live; "+ Add" makes a new one at the playhead.
+function _ovlPlayhead() { return els.trimVideo ? (els.trimVideo.currentTime || 0) : 0; }
+
+function addOverlay() {
+  const dur = trimDur() || 0;
+  const t = _ovlPlayhead();
+  const end = dur ? Math.min(dur, t + 3) : t + 3;
+  const o = {
+    text: (els.ovlText && els.ovlText.value) || 'TEXT',
+    start: +t.toFixed(2), end: +end.toFixed(2),
+    x_frac: 0.5, y_frac: 0.12,
+    size: +(els.ovlSize && els.ovlSize.value) || 56,
+    font: (els.ovlFont && els.ovlFont.value) || 'Anton',
+    color: (els.ovlColor && els.ovlColor.value) || '#ffffff',
+  };
+  state.overlays.push(o);
+  state.overlays.sort((a, b) => a.start - b.start);
+  state.ovlSel = state.overlays.indexOf(o);
+  syncOverlayControls();
+  renderOverlayTrack(); renderOverlayList();
+  setStatus('ovl-status', 'Overlay added — type the text + set its style/position.', 'ok');
+}
+
+function selectOverlay(i) {
+  if (i < 0 || i >= state.overlays.length) { state.ovlSel = null; return; }
+  state.ovlSel = i;
+  syncOverlayControls();
+  renderOverlayTrack(); renderOverlayList();
+}
+
+// Push the selected overlay's values into the editor controls.
+function syncOverlayControls() {
+  const o = state.overlays[state.ovlSel];
+  if (!o) return;
+  if (els.ovlText) els.ovlText.value = o.text;
+  if (els.ovlFont) els.ovlFont.value = o.font;
+  if (els.ovlSize) els.ovlSize.value = o.size;
+  if (els.ovlColor) els.ovlColor.value = o.color;
+  const grid = $('#ovl-grid');
+  if (grid) grid.querySelectorAll('button').forEach(b =>
+    b.classList.toggle('active', +b.dataset.x === o.x_frac && +b.dataset.y === o.y_frac));
+}
+
+// Write an editor-control change back into the selected overlay.
+function editSelectedOverlay(patch) {
+  const o = state.overlays[state.ovlSel];
+  if (!o) { setStatus('ovl-status', 'Select or add an overlay first.', 'err'); return; }
+  Object.assign(o, patch);
+  renderOverlayTrack(); renderOverlayList();
+}
+
+function renderOverlayTrack() {
+  const track = $('#ovl-track');
+  const info = $('#ovl-info');
+  if (info) info.textContent = state.overlays.length
+    ? `${state.overlays.length} overlay${state.overlays.length > 1 ? 's' : ''}`
+    : 'none';
+  if (!track) return;
+  const dur = trimDur() || 1;
+  track.innerHTML = state.overlays.map((o, i) => {
+    const left = (o.start / dur) * 100;
+    const width = Math.max(1, ((o.end - o.start) / dur) * 100);
+    const lbl = (o.text || '').split('\n')[0].slice(0, 14) || 'text';
+    return `<div class="trim-block ovl-block${i === state.ovlSel ? ' sel' : ''}" data-i="${i}" style="left:${left}%;width:${width}%;background:${o.color}22;border-color:${o.color}" title="${o.start.toFixed(1)}–${o.end.toFixed(1)}s — click to edit, drag to move, edges to resize">
+      <span class="trim-block-handle l"></span>
+      <span class="trim-block-lbl">${lbl}</span>
+      <span class="trim-block-handle r"></span>
+    </div>`;
+  }).join('') + '<div class="ill-cursor" id="ovl-cursor"></div>';
+  updateOverlayCursor();
+}
+
+function updateOverlayCursor() {
+  const cur = $('#ovl-cursor');
+  if (!cur) return;
+  const dur = trimDur() || 1;
+  cur.style.left = (_ovlPlayhead() / dur) * 100 + '%';
+}
+
+function onOverlayTrackDown(e) {
+  const block = e.target.closest('.trim-block');
+  if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  selectOverlay(i);
+  const rect = $('#ovl-track').getBoundingClientRect();
+  const br = block.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('trim-block-handle')) {
+    mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  } else if ((e.clientX - br.left) < 10) {
+    mode = 'resize-l';
+  } else if ((br.right - e.clientX) < 10) {
+    mode = 'resize-r';
+  }
+  state.ovlDrag = { i, mode, startX: e.clientX, trackW: rect.width,
+                    a: state.overlays[i].start, b: state.overlays[i].end };
+}
+
+function onOverlayDragMove(e) {
+  const d = state.ovlDrag;
+  if (!d) return;
+  const dur = trimDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const o = state.overlays[d.i];
+  if (!o) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    o.start = +ns.toFixed(2); o.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    o.start = +Math.max(0, Math.min(d.a + dt, o.end - TRIM_MIN)).toFixed(2);
+  } else {
+    o.end = +Math.max(o.start + TRIM_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderOverlayTrack();
+}
+
+function renderOverlayList() {
+  const ol = $('#ovl-list');
+  if (!ol) return;
+  if (!state.overlays.length) {
+    ol.innerHTML = '<li class="empty">No overlays — add one to burn styled text over a time window.</li>';
+    return;
+  }
+  ol.innerHTML = state.overlays.map((o, i) => `
+    <li class="${i === state.ovlSel ? 'current' : ''}">
+      <span class="sfx-it-name">“${((o.text || '').split('\n')[0] || 'text').slice(0, 18)}”</span>
+      <span class="ill-it-when">${o.start.toFixed(1)} → ${o.end.toFixed(1)}s · ${o.font} ${o.size}px</span>
+      <button class="ill-it-seek" data-edit="${i}" title="edit this overlay">✎</button>
+      <button class="ill-it-del danger" data-del="${i}" title="remove overlay">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.edit;
+    const o = state.overlays[i]; if (o && els.trimVideo) els.trimVideo.currentTime = o.start;
+    selectOverlay(i);
+  }));
+  ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.del;
+    state.overlays.splice(i, 1);
+    if (state.ovlSel === i) state.ovlSel = null;
+    else if (state.ovlSel > i) state.ovlSel--;
+    renderOverlayTrack(); renderOverlayList();
+  }));
+}
+
+// ═══════════════════════ PNG stickers (image at a time window) ════════════════
+// Upload a PNG (alpha kept), placed at a fractional center, scaled by width, over
+// a time window. Controls edit the SELECTED sticker live. Shares #trim-video.
+async function uploadSticker() {
+  if (!state.jobId) { setStatus('stk-status', 'Load a clip first.', 'err'); return; }
+  if (els.stkFile) els.stkFile.click();
+}
+async function onStickerFile(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  e.target.value = '';   // allow re-upload of the same file
+  setStatus('stk-status', 'Uploading…');
+  try {
+    const r = await fetch('/api/ill-upload?filename=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+    if (!r.ok) throw new Error(await r.text());
+    const { url, thumb } = await r.json();
+    const dur = trimDur() || 0;
+    const t = _ovlPlayhead();
+    const end = dur ? Math.min(dur, t + 3) : t + 3;
+    const s = { url, thumb: thumb || url, start: +t.toFixed(2), end: +end.toFixed(2),
+                x_frac: 0.5, y_frac: 0.5, scale: 0.3, opacity: 1.0 };
+    state.stickers.push(s);
+    state.stickers.sort((a, b) => a.start - b.start);
+    state.stkSel = state.stickers.indexOf(s);
+    syncStickerControls();
+    renderStickerTrack(); renderStickerList();
+    setStatus('stk-status', 'Sticker added — set its size/position/window.', 'ok');
+  } catch (err) {
+    setStatus('stk-status', 'Upload failed: ' + err.message, 'err');
+  }
+}
+function selectSticker(i) {
+  if (i < 0 || i >= state.stickers.length) { state.stkSel = null; return; }
+  state.stkSel = i;
+  syncStickerControls();
+  renderStickerTrack(); renderStickerList();
+}
+function syncStickerControls() {
+  const s = state.stickers[state.stkSel];
+  if (els.stkThumb) els.stkThumb.src = s ? (s.thumb || s.url) : '';
+  if (!s) return;
+  if (els.stkScale) els.stkScale.value = s.scale;
+  if (els.stkOpacity) els.stkOpacity.value = s.opacity;
+  const grid = $('#stk-grid');
+  if (grid) grid.querySelectorAll('button').forEach(b =>
+    b.classList.toggle('active', +b.dataset.x === s.x_frac && +b.dataset.y === s.y_frac));
+}
+function editSelectedSticker(patch) {
+  const s = state.stickers[state.stkSel];
+  if (!s) { setStatus('stk-status', 'Upload or select a sticker first.', 'err'); return; }
+  Object.assign(s, patch);
+  renderStickerTrack(); renderStickerList();
+}
+function renderStickerTrack() {
+  const track = $('#stk-track');
+  const info = $('#stk-info');
+  if (info) info.textContent = state.stickers.length
+    ? `${state.stickers.length} sticker${state.stickers.length > 1 ? 's' : ''}` : 'none';
+  if (!track) return;
+  const dur = trimDur() || 1;
+  track.innerHTML = state.stickers.map((s, i) => {
+    const left = (s.start / dur) * 100;
+    const width = Math.max(1, ((s.end - s.start) / dur) * 100);
+    return `<div class="trim-block stk-block${i === state.stkSel ? ' sel' : ''}" data-i="${i}" style="left:${left}%;width:${width}%" title="${s.start.toFixed(1)}–${s.end.toFixed(1)}s — click to edit, drag to move, edges to resize">
+      <span class="trim-block-handle l"></span>
+      <span class="trim-block-lbl">PNG</span>
+      <span class="trim-block-handle r"></span>
+    </div>`;
+  }).join('') + '<div class="ill-cursor" id="stk-cursor"></div>';
+  updateStickerCursor();
+}
+function updateStickerCursor() {
+  const cur = $('#stk-cursor');
+  if (!cur) return;
+  const dur = trimDur() || 1;
+  cur.style.left = (_ovlPlayhead() / dur) * 100 + '%';
+}
+function onStickerTrackDown(e) {
+  const block = e.target.closest('.trim-block');
+  if (!block) return;
+  e.preventDefault();
+  const i = +block.dataset.i;
+  selectSticker(i);
+  const rect = $('#stk-track').getBoundingClientRect();
+  const br = block.getBoundingClientRect();
+  let mode = 'move';
+  if (e.target.classList.contains('trim-block-handle')) {
+    mode = e.target.classList.contains('l') ? 'resize-l' : 'resize-r';
+  } else if ((e.clientX - br.left) < 10) { mode = 'resize-l'; }
+  else if ((br.right - e.clientX) < 10) { mode = 'resize-r'; }
+  state.stkDrag = { i, mode, startX: e.clientX, trackW: rect.width,
+                    a: state.stickers[i].start, b: state.stickers[i].end };
+}
+function onStickerDragMove(e) {
+  const d = state.stkDrag;
+  if (!d) return;
+  const dur = trimDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const s = state.stickers[d.i];
+  if (!s) return;
+  if (d.mode === 'move') {
+    const len = d.b - d.a;
+    const ns = Math.max(0, Math.min(d.a + dt, dur - len));
+    s.start = +ns.toFixed(2); s.end = +(ns + len).toFixed(2);
+  } else if (d.mode === 'resize-l') {
+    s.start = +Math.max(0, Math.min(d.a + dt, s.end - TRIM_MIN)).toFixed(2);
+  } else {
+    s.end = +Math.max(s.start + TRIM_MIN, Math.min(d.b + dt, dur)).toFixed(2);
+  }
+  renderStickerTrack();
+}
+function renderStickerList() {
+  const ol = $('#stk-list');
+  if (!ol) return;
+  if (!state.stickers.length) {
+    ol.innerHTML = '<li class="empty">No stickers — upload a PNG to overlay it over a time window.</li>';
+    return;
+  }
+  ol.innerHTML = state.stickers.map((s, i) => `
+    <li class="${i === state.stkSel ? 'current' : ''}">
+      <img class="stk-thumb" src="${s.thumb || s.url}" alt="">
+      <span class="ill-it-when">${s.start.toFixed(1)} → ${s.end.toFixed(1)}s · ${Math.round(s.scale * 100)}% · ${Math.round(s.opacity * 100)}%α</span>
+      <button class="ill-it-seek" data-edit="${i}" title="edit / seek">✎</button>
+      <button class="ill-it-del danger" data-del="${i}" title="remove sticker">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.ill-it-seek').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.edit;
+    const s = state.stickers[i]; if (s && els.trimVideo) els.trimVideo.currentTime = s.start;
+    selectSticker(i);
+  }));
+  ol.querySelectorAll('.ill-it-del').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.del;
+    state.stickers.splice(i, 1);
+    if (state.stkSel === i) state.stkSel = null;
+    else if (state.stkSel > i) state.stkSel--;
+    renderStickerTrack(); renderStickerList();
   }));
 }
