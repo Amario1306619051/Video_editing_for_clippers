@@ -19,7 +19,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 import renderer
-from models import (CaptionPosRange, ComboSegment, GrowSegment, IllustrationPick,
+from models import (CaptionPosRange, ComboSegment, FxWindow, GrowSegment, IllustrationPick,
                     IntroConfig, KeepSegment, Keyframe, Sticker, TextOverlay, Word, ZoomSegment)
 
 app = FastAPI()
@@ -111,6 +111,7 @@ async def render_ep(
             grow_segments=[GrowSegment(**g) for g in p.get("grow_segments", [])] or None,
             zoom_segments=[ZoomSegment(**z) for z in p.get("zoom_segments", [])] or None,
             combo_segments=[ComboSegment(**c) for c in p.get("combo_segments", [])] or None,
+            fx_windows=[FxWindow(**f) for f in p.get("fx_windows", [])] or None,
         )
         out_file = renderer.OUTPUT_DIR / out["filename"]
         if not out_file.exists():

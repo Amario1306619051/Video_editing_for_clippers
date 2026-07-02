@@ -1494,3 +1494,22 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .stk-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--line, #2a2a2a); border-radius: 4px; background: repeating-conic-gradient(#2a2a2a 0% 25%, #1a1a1a 0% 50%) 50% / 12px 12px; }
 .ovl-row input[type=range] { width: 90px; }
 .trim-block.stk-block.sel { outline: 2px solid #E8FF3A; outline-offset: 1px; }
+
+/* ── Spotlight FX (Render step) ─────────────────────────────────────── */
+.fx-sec { margin-top: 14px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.fx-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.fx-title { font-weight: 700; font-size: 13px; letter-spacing: .04em; }
+.fx-row { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev-2); padding: 10px; margin-top: 8px; }
+.fx-row-main { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.fx-row-main label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
+.fx-row-main input[type="number"] { width: 76px; }
+.fx-time input { width: 76px; }
+.fx-prev { border: 1px solid var(--border-strong); border-radius: 4px; background: #101014; flex: 0 0 auto; }
+.fx-del { padding: 4px 10px; flex: 0 0 auto; }
+.fx-media { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.fx-media .fx-q { flex: 1; min-width: 180px; }
+.fx-media .fx-cands { flex-basis: 100%; }
+.fx-picked { width: 42px; height: 64px; object-fit: cover; border-radius: 4px; border: 2px solid var(--accent); }
+.rd-prev-ctrls { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.rd-prev-ctrls .scrubber { flex: 1; }
+.rd-prev-ctrls .ctrl-btn { flex: 0 0 auto; }

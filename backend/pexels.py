@@ -84,6 +84,52 @@ def search(query: str, per_page: Optional[int] = None) -> list[dict]:
     return out
 
 
+PEXELS_VIDEO_SEARCH = "https://api.pexels.com/videos/search"
+
+
+def search_videos(query: str, per_page: Optional[int] = None) -> list[dict]:
+    """FREE stock VIDEO candidates (Pexels Videos, same API key) for the
+    Spotlight-FX video background. Returns {id, thumb, full, alt, photographer,
+    duration}; `full` is a portrait mp4 link sized close to 1080x1920 (SD/HD
+    tier — the render cover-crops it, no need for 4K)."""
+    if not PEXELS_API_KEY:
+        log.warning("PEXELS_API_KEY not set — returning no video candidates")
+        return []
+    per_page = per_page or CANDIDATES
+    try:
+        resp = requests.get(
+            PEXELS_VIDEO_SEARCH,
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": query or "abstract", "per_page": per_page,
+                    "orientation": "portrait"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        vids = resp.json().get("videos", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("Pexels video search failed for %r: %s", query, e)
+        return []
+
+    out: list[dict] = []
+    for v in vids:
+        files = [f for f in (v.get("video_files") or []) if (f.get("link") or "").strip()]
+        if not files:
+            continue
+        # closest height to 1920 without ballooning the download
+        files.sort(key=lambda f: abs((f.get("height") or 0) - 1440))
+        pick = files[0]
+        pics = v.get("video_pictures") or []
+        out.append({
+            "id": str(v.get("id", "")),
+            "thumb": (pics[0].get("picture") if pics else v.get("image", "")) or v.get("image", ""),
+            "full": pick.get("link", ""),
+            "alt": v.get("url", ""),
+            "photographer": (v.get("user") or {}).get("name", ""),
+            "duration": v.get("duration", 0),
+        })
+    return out
+
+
 def download_pick(job_id: str, url: str) -> Path:
     """Download one picked image to temp/, deduped by URL hash. Returns the path.
     A `/temp/...` url is a user-UPLOADED image already on disk — used directly."""

@@ -426,6 +426,7 @@ function canGoToStep(n) {
 }
 
 function showStep(n) {
+  if (typeof rdPreviewStop === 'function') { try { rdPreviewStop(); } catch (e) {} }
   state.step = n;
   for (let i = 1; i <= 8; i++) {
     const p = $(`#panel-${i}`);
@@ -448,6 +449,7 @@ function showStep(n) {
     renderWordChips();
     redrawPreview(els.preview2);
     updateRenderIntroNote();
+    try { renderFxList(); } catch (e) { /* fx UI best-effort */ }
   }
   if (n === 4) {
     requestAnimationFrame(initThumbStep);
@@ -2126,6 +2128,8 @@ function redrawPreview(canvas) {
     ctx.restore();
   }
 
+  try { drawFxLive(ctx, PREVIEW_W, PREVIEW_H); } catch (e) { /* fx preview best-effort */ }
+
   if (canvas === els.preview && els.previewMeta) {
     const c = (b1 ? 1 : 0) + (b2 ? 1 : 0);
     const kf = `${state.keyframes[1].length}+${state.keyframes[2].length} keyframes`;
@@ -2329,6 +2333,7 @@ async function doDownload() {
     state.capPos = []; state.capPosA = null;  // caption-position windows are per-clip
     state.overlays = []; state.ovlSel = null; state.ovlA = null;  // text overlays are per-clip
     state.stickers = []; state.stkSel = null;  // stickers are per-clip
+    state.fx = [];                             // Spotlight FX windows are per-clip
     state.grow = [];                       // top-slot grow windows are per-clip
     state.zoom = [];                       // top-slot zoom windows are per-clip
     state.combo = [];                      // top-slot grow+zoom windows are per-clip
@@ -2391,7 +2396,7 @@ function renderTranscriptEditor() {
   box.querySelectorAll('.tw-word').forEach(inp => {
     inp.addEventListener('input', (e) => {
       const i = +e.target.dataset.i;
-      if (state.words[i]) state.words[i].word = e.target.value;
+      if (state.words[i]) { state.words[i].word = e.target.value; state.wordsSource = 'edited'; }
       e.target.size = Math.max(2, e.target.value.length);   // auto-grow
       scheduleTranscriptSave();
     });
@@ -2404,6 +2409,7 @@ function renderTranscriptEditor() {
   });
   box.querySelectorAll('.tw-del').forEach(b => b.addEventListener('click', () => {
     state.words.splice(+b.dataset.i, 1);
+    state.wordsSource = 'edited';
     renderTranscriptEditor();
     try { renderWordChips(); } catch (_) {}
     scheduleTranscriptSave();
@@ -2438,6 +2444,7 @@ async function transcribeForEdit() {
   try {
     const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
     state.words = tr.words || [];
+    state.wordsSource = 'whisper';
     renderTranscriptEditor();
     try { renderWordChips(); } catch (_) {}
     saveTranscriptNow();
@@ -2582,6 +2589,7 @@ function buildRenderBody(withWords) {
     grow_segments: (state.grow || []).map(g => ({ start: g.start, end: g.end, top_frac: g.top_frac, ramp: g.ramp || 0 })),
     zoom_segments: (state.zoom || []).map(z => ({ start: z.start, end: z.end, zoom: +z.zoom || 1.4, ramp: +z.ramp || 1.5 })),
     combo_segments: (state.combo || []).map(c => ({ start: c.start, end: c.end, top_frac: c.top_frac || 0.4375, zoom: +c.zoom || 1.4, ramp: +c.ramp || 1.5 })),
+    fx_windows: (state.fx || []).map(f => ({ start: +f.start, end: +f.end, template: +f.template || 1, position: f.position || 'bottom', bg: f.bg || 'dim', media_url: f.media_url || null, text_scale: +f.text_scale || 1, max_words: +f.max_words || 0 })),
   };
   logBoxes(body);
   return body;
@@ -2699,8 +2707,19 @@ async function doRender() {
       setStatus('rd-status', 'Transcribing audio (Whisper · first run is slow, the model downloads once)…');
       const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
       state.words = tr.words;
+      state.wordsSource = 'whisper';
       els.wordsBox.classList.remove('hidden');
       renderWordChips();
+    }
+    // Spotlight FX needs ACCURATE per-word timing — a transcript loaded from the
+    // old per-job cache is re-whisper'd first. (No FX → the old cache is fine.)
+    if ((state.fx || []).length && state.wordsSource === 'cache') {
+      setStatus('rd-status', 'FX aktif — re-transcribing so the FX text timing is fresh…');
+      const tr2 = await apiPost('/api/transcribe', { job_id: state.jobId });
+      state.words = tr2.words;
+      state.wordsSource = 'whisper';
+      renderWordChips();
+      try { saveTranscriptNow(); } catch (e) { /* cache update best-effort */ }
     }
     await renderOnce(true);
   } catch (e) {
@@ -3884,6 +3903,7 @@ async function openQueueJob(key) {
   // Restore THIS clip's transcript (edited or cached) so the Transcript/Render
   // steps show the right words — never the previous clip's.
   state.words = (() => { try { return job.transcript ? JSON.parse(job.transcript) : []; } catch (_) { return []; } })();
+  state.wordsSource = state.words.length ? 'cache' : '';   // old per-job cache — fine WITHOUT FX; FX re-transcribes
   try { renderWordChips(); renderTranscriptEditor(); } catch (_) {}
   if (els.wordsBox) els.wordsBox.classList.toggle('hidden', !state.words.length);
   resetRenderResult();   // clear the previous clip's render output/download from the Render step
@@ -3898,6 +3918,7 @@ async function openQueueJob(key) {
   state.overlays = _parse(job.text_overlays, []);  // text overlays
   state.ovlSel = null; state.ovlA = null;
   state.stickers = _parse(job.stickers, []);       // PNG stickers
+  state.fx = _parse(job.fx_windows, []);           // Spotlight FX windows
   state.stkSel = null;
   state.grow = _parse(job.grow_segments, []);      // top-slot grow windows
   state.zoom = _parse(job.zoom_segments, []);      // top-slot zoom windows
@@ -3966,7 +3987,7 @@ function queueSig() {
     p1: ($('#ab-prompt-1') ? $('#ab-prompt-1').value : ''),
     p2: ($('#ab-prompt-2') ? $('#ab-prompt-2').value : ''),
     th: thumbSettings(),
-    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption, capPos: state.capPos, ovl: state.overlays, stk: state.stickers, grow: state.grow, zoom: state.zoom, combo: state.combo,
+    sfx: state.sfx, ills: state.ills, keep: state.keep, cap: state.caption, capPos: state.capPos, ovl: state.overlays, stk: state.stickers, grow: state.grow, zoom: state.zoom, combo: state.combo, fx: state.fx,
   });
 }
 
@@ -3995,6 +4016,7 @@ async function autosaveQueue() {
       caption_pos_ranges: JSON.stringify(state.capPos || []),
       text_overlays: JSON.stringify(state.overlays || []),
       stickers: JSON.stringify(state.stickers || []),
+      fx_windows: JSON.stringify(state.fx || []),
     });
     setStatus('queue-status', 'Progress saved ✓', 'ok');
     // Keep the intro-card PNG in sync so a LATER batch / ▶ render (when this clip
@@ -4887,6 +4909,7 @@ function subSnapshot() {
     grow: state.grow, zoom: state.zoom, combo: state.combo,
     caption: state.caption,
     sfx: state.sfx, ills: state.ills, keep: state.keep, capPos: state.capPos, overlays: state.overlays, stickers: state.stickers,
+    fx: state.fx,
   }));
 }
 
@@ -4900,6 +4923,7 @@ function subApply(snap) {   // load a snapshot back into the live editor for twe
   state.capPos = c(snap.capPos || []); state.capPosA = null;
   state.overlays = c(snap.overlays || []); state.ovlSel = null; state.ovlA = null;
   state.stickers = c(snap.stickers || []); state.stkSel = null;
+  state.fx = c(snap.fx || []);
   if (els.capFont) els.capFont.value = state.caption.font;
   if (els.capSize) els.capSize.value = state.caption.size;
   if (els.capStyle) els.capStyle.value = state.caption.style;
@@ -5044,6 +5068,7 @@ function buildSubRenderBody(sc, withWords) {
     grow_segments: (s.grow || []).map(g => ({ start: g.start, end: g.end, top_frac: g.top_frac, ramp: g.ramp || 0 })),
     zoom_segments: (s.zoom || []).map(z => ({ start: z.start, end: z.end, zoom: +z.zoom || 1.4, ramp: +z.ramp || 1.5 })),
     combo_segments: (s.combo || []).map(c => ({ start: c.start, end: c.end, top_frac: c.top_frac || 0.4375, zoom: +c.zoom || 1.4, ramp: +c.ramp || 1.5 })),
+    fx_windows: (s.fx || []).map(f => ({ start: +f.start, end: +f.end, template: +f.template || 1, position: f.position || 'bottom', bg: f.bg || 'dim', media_url: f.media_url || null, text_scale: +f.text_scale || 1, max_words: +f.max_words || 0 })),
   };
 }
 
@@ -5053,11 +5078,14 @@ async function renderAllSubclips() {
   if (new Set(names).size !== names.length) { setStatus('tr-status', 'Sub-clip names must be unique — they become filenames.', 'err'); return; }
   const btn = $('#btn-sub-render'); if (btn) btn.disabled = true;
   try {
-    if (!state.words.length) {
+    const anyFx = state.subclips.some(sc => ((sc.snap && sc.snap.fx) || []).length) || (state.fx || []).length;
+    if (!state.words.length || (anyFx && state.wordsSource === 'cache')) {
+      // no transcript yet, OR FX windows exist but the words came from the old
+      // per-job cache — FX text needs fresh per-word timing (no FX → cache is fine).
       setStatus('tr-status', 'Transcribing once (Whisper)…');
       try {
         const tr = await apiPost('/api/transcribe', { job_id: state.jobId });
-        state.words = tr.words; if (els.wordsBox) els.wordsBox.classList.remove('hidden'); renderWordChips();
+        state.words = tr.words; state.wordsSource = 'whisper'; if (els.wordsBox) els.wordsBox.classList.remove('hidden'); renderWordChips();
       } catch (e) { /* fall back to no-caption renders */ }
     }
     const withWords = state.words.length > 0;
@@ -5688,4 +5716,421 @@ function renderStickerList() {
     else if (state.stkSel > i) state.stkSel--;
     renderStickerTrack(); renderStickerList();
   }));
+}
+
+
+// ───────────────────────── Spotlight FX (Render step) ─────────────────────────
+// Windows of big progressive stacked captions over a treated background. Each
+// window: [start,end] seconds, template 1-10 (fonts/sizes/2 colors per line),
+// text position, background mode, and a picked stock image/video when needed.
+// state.fx = [{start,end,template,position,bg,media_url,media_thumb}]
+let FX_TPLS = [];   // fetched from /api/fx-templates (single source of truth)
+(async () => {
+  try {
+    const r = await fetch('/api/fx-templates');
+    if (r.ok) FX_TPLS = (await r.json()).templates || [];
+  } catch (e) { /* previews just fall back */ }
+})();
+
+const FX_BG_LABELS = {
+  dim: 'Darkened scene', blur: 'Blur + sharp subject', image: 'Stock image',
+  video: 'Stock video', image_person: 'Image + main subject',
+};
+
+function fxTpl(id) { return FX_TPLS.find(t => t.id === +id) || FX_TPLS[0] || null; }
+
+// Draw ONE template line honoring its props (box band / hollow / italic /
+// lowercase / word-color alternation / letter spacing). Shared by the mini
+// template preview and the live FX preview.
+function fxDrawLine(ctx, spec, text, cx, y, scale) {
+  const fs = spec.fs * scale;
+  const shown = spec.upper === false ? text.toLowerCase() : text.toUpperCase();
+  const style = `${spec.italic ? 'italic ' : ''}bold ${fs}px "${spec.font}", Impact, sans-serif`;
+  ctx.font = style;
+  if ('letterSpacing' in ctx) ctx.letterSpacing = spec.spacing ? `${spec.spacing * scale}px` : '0px';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  if (spec.box) {
+    const w = ctx.measureText(shown).width;
+    const padX = fs * 0.34, padY = fs * 0.30;
+    ctx.fillStyle = spec.box;
+    const rx = cx - w / 2 - padX, ry = y - fs / 2 - padY * 0.4;
+    const rw = w + padX * 2, rh = fs + padY;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(rx, ry, rw, rh, rh / 2); else ctx.rect(rx, ry, rw, rh);
+    ctx.fill();
+    ctx.fillStyle = spec.box_text || '#111111';
+    ctx.fillText(shown, cx, y);
+  } else if (spec.hollow) {
+    ctx.lineWidth = Math.max(1.5, fs * 0.07);
+    ctx.strokeStyle = spec.color;
+    ctx.strokeText(shown, cx, y);
+  } else if (spec.alt && spec.alt.length) {
+    // words alternate through the alt colors (Hormozi style)
+    const words = shown.split(/\s+/).filter(Boolean);
+    const sp = ctx.measureText(' ').width;
+    const widths = words.map(w => ctx.measureText(w).width);
+    const total = widths.reduce((a, b) => a + b, 0) + sp * (words.length - 1);
+    let x = cx - total / 2;
+    ctx.textAlign = 'left';
+    words.forEach((w, k) => {
+      ctx.lineWidth = Math.max(2, fs * 0.14);
+      ctx.strokeStyle = '#000';
+      ctx.strokeText(w, x, y);
+      ctx.fillStyle = spec.alt[k % spec.alt.length];
+      ctx.fillText(w, x, y);
+      x += widths[k] + sp;
+    });
+    ctx.textAlign = 'center';
+  } else {
+    ctx.lineWidth = Math.max(2, fs * 0.14);
+    ctx.strokeStyle = '#000';
+    ctx.strokeText(shown, cx, y);
+    ctx.fillStyle = spec.color;
+    ctx.fillText(shown, cx, y);
+  }
+  if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+}
+
+// Mini preview of a template: dark bg + sample lines at scaled size.
+function drawFxPreview(canvas, tplId) {
+  const tpl = fxTpl(tplId);
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = '#101014';
+  ctx.fillRect(0, 0, W, H);
+  if (!tpl) return;
+  const SAMPLES = ['KETIKA', 'KITA BAHAS', 'SOAL ISU SOSIAL', 'INDONESIA'];
+  const scale = W / 1080;
+  ctx.save();
+  if (tpl.rot) { ctx.translate(W / 2, H / 2); ctx.rotate(tpl.rot * Math.PI / 180); ctx.translate(-W / 2, -H / 2); }
+  const lineHs = tpl.lines.map(l => l.fs * scale * 1.14);
+  let y = H / 2 - lineHs.reduce((a, b) => a + b, 0) / 2;
+  tpl.lines.forEach((l, i) => {
+    y += lineHs[i] / 2;
+    fxDrawLine(ctx, l, SAMPLES[i] || 'TEXT', W / 2, y, scale);
+    y += lineHs[i] / 2;
+  });
+  ctx.restore();
+}
+
+function addFxWindow() {
+  const t = (els.video && els.video.currentTime) || 0;
+  state.fx = state.fx || [];
+  state.fx.push({ start: +t.toFixed(1), end: +(t + 4).toFixed(1), template: 1, position: 'bottom', bg: 'dim', media_url: null, media_thumb: null, text_scale: 1, max_words: 5 });
+  renderFxList();
+  setStatus('fx-status', 'FX window added — set the seconds, pick a template + background.', 'ok');
+}
+
+function renderFxList() {
+  const host = $('#fx-list');
+  if (!host) return;
+  const fx = state.fx || [];
+  fx.forEach(f => { if (f.max_words == null) f.max_words = 5; });   // default 5 per screen
+  if (!fx.length) { host.innerHTML = '<div class="muted" style="font-size:12px">No FX windows — the whole clip renders normally.</div>'; return; }
+  host.innerHTML = fx.map((f, i) => `
+    <div class="fx-row" data-i="${i}">
+      <div class="fx-row-main">
+        <label class="fx-time"><span>Start s</span><input type="number" step="0.1" min="0" class="fx-start" data-i="${i}" value="${f.start}"></label>
+        <label class="fx-time"><span>End s</span><input type="number" step="0.1" min="0" class="fx-end" data-i="${i}" value="${f.end}"></label>
+        <label><span>Template</span>
+          <select class="fx-tpl" data-i="${i}">
+            ${(FX_TPLS.length ? FX_TPLS : [{id:1,name:'Impact Stack'}]).map(t => `<option value="${t.id}"${+f.template === t.id ? ' selected' : ''}>${t.id}. ${t.name}</option>`).join('')}
+          </select>
+        </label>
+        <label><span>Text pos</span>
+          <select class="fx-pos" data-i="${i}">
+            <option value="top"${f.position === 'top' ? ' selected' : ''}>Top</option>
+            <option value="middle"${f.position === 'middle' ? ' selected' : ''}>Middle</option>
+            <option value="bottom"${!f.position || f.position === 'bottom' ? ' selected' : ''}>Bottom</option>
+          </select>
+        </label>
+        <label><span>Background</span>
+          <select class="fx-bg" data-i="${i}">
+            ${Object.entries(FX_BG_LABELS).map(([v, lbl]) => `<option value="${v}"${(f.bg || 'dim') === v ? ' selected' : ''}>${lbl}</option>`).join('')}
+          </select>
+        </label>
+        <label><span>Text size %</span><input type="number" class="fx-scale" data-i="${i}" min="40" max="200" step="5" value="${Math.round((f.text_scale || 1) * 100)}"></label>
+        <label><span>Max words</span><input type="number" class="fx-maxw" data-i="${i}" min="0" max="12" step="1" value="${+f.max_words || 0}" title="max words per screen-fill — 0 = auto (fill by line capacity)"></label>
+        <canvas class="fx-prev" width="96" height="170" data-i="${i}" title="template preview"></canvas>
+        <button class="fx-del danger" data-i="${i}" title="remove">×</button>
+      </div>
+      ${['image', 'video', 'image_person'].includes(f.bg) ? `
+      <div class="fx-media">
+        <input class="fx-q" data-i="${i}" placeholder="${f.bg === 'video' ? 'search free stock videos (Pexels)' : 'search stock images'}">
+        <button class="fx-go ghost" data-i="${i}" type="button">Search</button>
+        ${f.media_thumb ? `<img class="fx-picked" src="${f.media_thumb}" title="picked">` : '<span class="muted" style="font-size:11px">no media picked → falls back to dim</span>'}
+        <div class="fx-cands thumb-ill-cands" data-i="${i}"></div>
+      </div>` : ''}
+    </div>`).join('');
+
+  host.querySelectorAll('.fx-prev').forEach(c => drawFxPreview(c, fx[+c.dataset.i].template));
+  const upd = (i, k, v) => { state.fx[i][k] = v; };
+  host.querySelectorAll('.fx-start').forEach(e => e.addEventListener('change', () => { upd(+e.dataset.i, 'start', +e.value || 0); }));
+  host.querySelectorAll('.fx-end').forEach(e => e.addEventListener('change', () => { upd(+e.dataset.i, 'end', +e.value || 0); }));
+  host.querySelectorAll('.fx-tpl').forEach(e => e.addEventListener('change', () => {
+    upd(+e.dataset.i, 'template', +e.value);
+    const c = host.querySelector(`.fx-prev[data-i="${e.dataset.i}"]`);
+    if (c) drawFxPreview(c, +e.value);
+  }));
+  host.querySelectorAll('.fx-pos').forEach(e => e.addEventListener('change', () => upd(+e.dataset.i, 'position', e.value)));
+  host.querySelectorAll('.fx-scale').forEach(e => e.addEventListener('change', () => {
+    upd(+e.dataset.i, 'text_scale', Math.max(0.4, Math.min(2, (+e.value || 100) / 100)));
+    redrawPreview(els.preview2);
+  }));
+  host.querySelectorAll('.fx-maxw').forEach(e => e.addEventListener('change', () => {
+    upd(+e.dataset.i, 'max_words', Math.max(0, Math.min(12, +e.value || 0)));
+    redrawPreview(els.preview2);
+  }));
+  host.querySelectorAll('.fx-bg').forEach(e => e.addEventListener('change', () => { upd(+e.dataset.i, 'bg', e.value); renderFxList(); }));
+  host.querySelectorAll('.fx-del').forEach(e => e.addEventListener('click', () => { state.fx.splice(+e.dataset.i, 1); renderFxList(); }));
+  host.querySelectorAll('.fx-go').forEach(b => b.addEventListener('click', () => fxSearchMedia(+b.dataset.i)));
+  host.querySelectorAll('.fx-q').forEach(inp => inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') fxSearchMedia(+inp.dataset.i); }));
+}
+
+async function fxSearchMedia(i) {
+  const host = $('#fx-list');
+  const f = (state.fx || [])[i];
+  if (!host || !f) return;
+  const q = (host.querySelector(`.fx-q[data-i="${i}"]`) || {}).value || '';
+  const cont = host.querySelector(`.fx-cands[data-i="${i}"]`);
+  if (!q.trim()) { setStatus('fx-status', 'Type a search query first.', 'err'); return; }
+  setStatus('fx-status', f.bg === 'video' ? 'Searching free stock videos…' : 'Searching stock images…');
+  try {
+    const ep = f.bg === 'video' ? '/api/search-videos' : '/api/search';
+    const res = await apiPost(ep, { query: q.trim() });
+    const cands = res.candidates || [];
+    if (cont) {
+      cont.innerHTML = cands.map(c => `<button class="thumb-cand" type="button" data-url="${escapeHtml(c.full)}" data-thumb="${escapeHtml(c.thumb)}" title="${escapeHtml(c.photographer || '')}${c.duration ? ' · ' + c.duration + 's' : ''}"><img src="${escapeHtml(c.thumb)}" loading="lazy" alt=""></button>`).join('');
+      cont.querySelectorAll('.thumb-cand').forEach(b => b.addEventListener('click', () => {
+        f.media_url = b.dataset.url;
+        f.media_thumb = b.dataset.thumb;
+        renderFxList();
+        setStatus('fx-status', 'Media picked ✓', 'ok');
+      }));
+    }
+    setStatus('fx-status', cands.length ? 'Click one to use it.' : 'No results.', cands.length ? 'ok' : 'err');
+  } catch (e) {
+    setStatus('fx-status', 'Search failed: ' + e.message, 'err');
+  }
+}
+
+const _fxAddBtn = $('#btn-fx-add');
+if (_fxAddBtn) _fxAddBtn.addEventListener('click', addFxWindow);
+
+
+// ─────────────── Render-step preview: play with SOUND + live Spotlight FX ───────────────
+// The right-side Preview canvas on the Render step becomes playable: ▶ plays the
+// main <video> (unmuted) and redraws the composite via rAF; inside an FX window
+// the treated background + progressive stacked text are drawn LIVE so the user
+// can audition the effect without rendering.
+let _rdRaf = 0, _rdPlaying = false;
+
+function _rdSyncScrub() {
+  const sc = $('#rd-scrub');
+  const v = els.video;
+  if (sc && v && document.activeElement !== sc) sc.value = v.currentTime || 0;
+  const t = $('#rd-time');
+  if (t && v) t.textContent = formatTime(v.currentTime || 0);
+}
+
+function _rdLoop() {
+  if (!_rdPlaying) return;
+  const v = els.video;
+  state.currentTime = v.currentTime || 0;
+  redrawPreview(els.preview2);
+  _rdSyncScrub();
+  if (v.paused || v.ended) { rdPreviewStop(); return; }
+  _rdRaf = requestAnimationFrame(_rdLoop);
+}
+
+function rdPreviewPlay() {
+  const v = els.video;
+  if (!v || !v.duration) return;
+  v.muted = false;
+  _rdPlaying = true;
+  const b = $('#rd-play'); if (b) b.textContent = '❚❚';
+  v.play().catch(() => {});
+  cancelAnimationFrame(_rdRaf);
+  _rdRaf = requestAnimationFrame(_rdLoop);
+}
+
+function rdPreviewStop() {
+  if (!_rdPlaying) return;
+  _rdPlaying = false;
+  cancelAnimationFrame(_rdRaf);
+  const b = $('#rd-play'); if (b) b.textContent = '▶';
+  const v = els.video;
+  if (v && !v.paused) v.pause();
+}
+
+(function wireRdPreview() {
+  const btn = $('#rd-play'), sc = $('#rd-scrub');
+  if (!btn || !sc) return;
+  btn.addEventListener('click', () => { _rdPlaying ? rdPreviewStop() : rdPreviewPlay(); });
+  sc.addEventListener('input', () => {
+    const v = els.video;
+    if (!v || !v.duration) return;
+    rdPreviewStop();
+    v.currentTime = +sc.value;
+    state.currentTime = +sc.value;
+    redrawPreview(els.preview2);
+    _rdSyncScrub();
+  });
+  if (els.video) els.video.addEventListener('loadedmetadata', () => { sc.max = els.video.duration || 0; });
+})();
+
+// ── live Spotlight FX in the preview canvas ──
+const _fxImgCache = {};   // media_thumb url → Image
+
+function _fxActiveWindow(t) {
+  return (state.fx || []).find(f => t >= +f.start && t < +f.end) || null;
+}
+
+function _fxLineBudget(fs) { return Math.max(4, Math.floor(970 / (0.52 * fs))); }
+
+// mirror of the backend stanza builder (accumulate into 3 sized lines)
+function _fxStanzas(wordsIn, tpl, maxWords) {
+  const budgets = tpl.lines.map(l => _fxLineBudget(l.fs));
+  const stanzas = [];
+  let cur = [], line = 0, used = 0;
+  for (const w of wordsIn) {
+    const txt = (w.word || '').trim();
+    if (!txt) continue;
+    let need = txt.length + (used ? 1 : 0);
+    while (used && used + need > budgets[line]) {
+      line += 1; used = 0; need = txt.length;
+      if (line >= budgets.length) { stanzas.push(cur); cur = []; line = 0; break; }
+    }
+    cur.push({ text: txt, start: w.start, end: w.end, line });
+    used += need;
+    if (maxWords && cur.length >= maxWords) { stanzas.push(cur); cur = []; line = 0; used = 0; }
+  }
+  if (cur.length) stanzas.push(cur);
+  return stanzas;
+}
+
+function drawFxLive(ctx, W, H) {
+  const t = state.currentTime || 0;
+  const f = _fxActiveWindow(t);
+  if (!f) return;
+  const tpl = (typeof fxTpl === 'function' ? fxTpl(f.template) : null);
+
+  // background treatment over the composed preview. For dim/blur the SUBJECT's
+  // slot (box1 = top slot, two-box layout) stays UNTREATED at its own position —
+  // "surrounding goes dark, the person doesn't" (mirrors the renderer).
+  const bg = f.bg || 'dim';
+  const hasMedia = ['image', 'video', 'image_person'].includes(bg) && (f.media_thumb || f.media_url);
+  let keepImg = null;
+  if ((bg === 'dim' || bg === 'blur') && boxAt(1, +f.start + 0.05) && boxAt(2, +f.start + 0.05)) {
+    const slotH = Math.max(1, Math.round((TOP_H / OUT_H) * H));
+    try { keepImg = ctx.getImageData(0, 0, W, slotH); } catch (e) { keepImg = null; }
+  }
+  if (bg === 'blur') {
+    const tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    tmp.getContext('2d').drawImage(ctx.canvas, 0, 0);
+    ctx.save();
+    ctx.filter = 'blur(5px)';
+    ctx.drawImage(tmp, 0, 0);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(0,0,0,0.30)';
+    ctx.fillRect(0, 0, W, H);
+    if (keepImg) ctx.putImageData(keepImg, 0, 0);
+  } else if (hasMedia) {
+    const url = f.media_thumb || f.media_url;
+    let img = _fxImgCache[url];
+    if (!img) {
+      img = new Image();
+      img.onload = () => redrawPreview(els.preview2);
+      img.src = url;
+      _fxImgCache[url] = img;
+    }
+    if (img.complete && img.naturalWidth) {
+      // cover-draw the media (video → its thumbnail as a static stand-in)
+      const ar = img.naturalWidth / img.naturalHeight, dar = W / H;
+      let sw = img.naturalWidth, sh = img.naturalHeight, sx = 0, sy = 0;
+      if (ar > dar) { sw = sh * dar; sx = (img.naturalWidth - sw) / 2; }
+      else { sh = sw / dar; sy = (img.naturalHeight - sh) / 2; }
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
+      ctx.fillStyle = bg === 'image_person' ? 'rgba(0,0,0,0.30)' : 'rgba(0,0,0,0.18)';
+      ctx.fillRect(0, 0, W, H);
+      if (bg === 'image_person') {
+        // main subject = box1 crop, contained into a centered upper block
+        const b = boxAt(1, +f.start + 0.05);
+        const v = els.video;
+        if (b && v && v.videoWidth) {
+          const maxW = W * 0.9, maxH = H * 0.6;
+          const ar2 = b.w / b.h;
+          let dw = maxW, dh = dw / ar2;
+          if (dh > maxH) { dh = maxH; dw = dh * ar2; }
+          try { ctx.drawImage(v, b.x, b.y, b.w, b.h, (W - dw) / 2, H * 0.365 - dh / 2, dw, dh); } catch (e) {}
+        }
+      }
+      if (bg === 'video') {
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('(stock video plays here — thumbnail shown)', W / 2, H - 8);
+      }
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.62)';
+      ctx.fillRect(0, 0, W, H);
+    }
+  } else {
+    // dim (and the no-media fallback the renderer uses too)
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(0, 0, W, H);
+    if (keepImg) ctx.putImageData(keepImg, 0, 0);
+  }
+
+  // progressive stacked text (accumulate) — words spoken so far in this stanza
+  if (!tpl || !(state.words || []).length) return;
+  const winWords = state.words.filter(w => {
+    const mid = (w.start + w.end) / 2;
+    return mid >= +f.start && mid < +f.end;
+  });
+  if (!winWords.length) return;
+  const _sc = Math.max(0.4, Math.min(2, +f.text_scale || 1));
+  const tplS = Math.abs(_sc - 1) > 0.001
+    ? { ...tpl, lines: tpl.lines.map(l => ({ ...l, fs: Math.max(24, Math.round(l.fs * _sc)) })) }
+    : tpl;
+  const stanzas = _fxStanzas(winWords, tplS, +f.max_words || 0);
+  let st = null, stEnd = 0;
+  for (let i = 0; i < stanzas.length; i++) {
+    const first = stanzas[i][0].start;
+    const last = stanzas[i][stanzas[i].length - 1];
+    const nxt = i + 1 < stanzas.length ? stanzas[i + 1][0].start : +f.end;
+    const end = Math.min(+f.end, last.end + 0.9, nxt);
+    if (t >= first && t < end) { st = stanzas[i]; stEnd = end; break; }
+  }
+  if (!st) return;
+  const revealed = st.filter(w => w.start <= t);
+  if (!revealed.length) return;
+
+  const scale = W / 1080;
+  const lines = tplS.lines.map((spec, li) => ({
+    spec,
+    text: revealed.filter(w => w.line === li).map(w => w.text).join(' '),
+  })).filter(l => l.text);
+  const lineHs = lines.map(l => l.spec.fs * scale * 1.14);
+  const blockH = lineHs.reduce((a, b) => a + b, 0);
+  const pos = f.position || 'bottom';
+  let y;
+  if (pos === 'top') y = 170 * (H / 1920);
+  else if (pos === 'middle') y = H / 2 - blockH / 2;
+  else y = H - 150 * (H / 1920) - blockH;
+
+  ctx.save();
+  if (tplS.rot) {
+    const cyy = y + blockH / 2;
+    ctx.translate(W / 2, cyy); ctx.rotate(tplS.rot * Math.PI / 180); ctx.translate(-W / 2, -cyy);
+  }
+  lines.forEach((l, i) => {
+    y += lineHs[i] / 2;
+    fxDrawLine(ctx, l.spec, l.text, W / 2, y, scale);
+    y += lineHs[i] / 2;
+  });
+  ctx.restore();
 }

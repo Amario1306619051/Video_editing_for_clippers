@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Archivo+Black&family=Poppins:wght@700&family=Fjalla+One&family=Bangers&family=Titan+One&family=Alfa+Slab+One&family=Oswald:wght@500;600&family=Bungee&family=Righteous&family=Luckiest+Guy&family=Permanent+Marker&family=Pacifico&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260629f">
+<link rel="stylesheet" href="style.css?v=20260702f">
 </head>
 <body>
 <header class="topbar">
@@ -464,6 +464,16 @@
           <span class="hint" id="rd-intro-status">Intro card: off — configure it in the <b>Thumbnail</b> step (preview voice + transition there).</span>
         </div>
 
+        <div class="fx-sec" id="fx-sec">
+          <div class="fx-head">
+            <span class="fx-title">✨ Spotlight FX</span>
+            <button id="btn-fx-add" class="ghost small" type="button">+ Add FX window</button>
+            <span class="hint">Big stacked captions that APPEAR word-by-word over a treated background. Inside each window the normal captions + scene are overridden (e.g. FX at 1–5s &amp; 9–10s, normal at 6–8s).</span>
+          </div>
+          <div id="fx-list"></div>
+          <span class="status" id="fx-status"></span>
+        </div>
+
         <div class="words-box hidden" id="words-box">
           <div class="muted">No transcript yet.</div>
         </div>
@@ -472,6 +482,12 @@
       <aside class="preview-wrap">
         <div class="preview-label">Preview</div>
         <canvas id="preview-2" width="270" height="480"></canvas>
+        <div class="rd-prev-ctrls">
+          <button id="rd-play" class="ctrl-btn" type="button" title="Play / pause with sound">▶</button>
+          <input type="range" id="rd-scrub" class="scrubber" min="0" max="100" step="0.05" value="0">
+          <span class="time-cur" id="rd-time">0:00.0</span>
+        </div>
+        <div class="hint" style="text-align:center;margin-top:2px">play / scrub · 🔊 with sound · FX windows show live</div>
       </aside>
     </div>
 
@@ -922,6 +938,6 @@
 
 </div>
 
-<script src="app.js?v=20260629f"></script>
+<script src="app.js?v=20260702f"></script>
 </body>
 </html>

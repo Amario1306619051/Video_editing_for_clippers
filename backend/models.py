@@ -202,6 +202,32 @@ class KeepSegment(BaseModel):
     end: float
 
 
+class FxWindow(BaseModel):
+    """Spotlight FX: over [start,end] (seconds, clip time) the arranged scene +
+    normal karaoke captions are REPLACED by a treated background + big stacked
+    progressive text (words APPEAR as they're spoken, accumulating — 'KETIKA' →
+    'KETIKA BAHAS' → 'KETIKA BAHAS ISU SOSIAL' — no per-word recolor/highlight).
+      - template: 1..10 — picks the line stack (fonts / sizes / the 2 colors).
+      - position: 'top' | 'middle' | 'bottom' — where the text block sits.
+      - bg: 'dim'   → the composed scene darkened (person visible through it)
+            'blur'  → the composed scene blurred + darkened
+            'image' → a stock image fills the frame (text is the star)
+            'video' → a free stock video fills the frame
+            'image_person' → stock image behind + the MAIN SUBJECT (box1 crop)
+                             kept prominent on top of it
+      - media_url: the picked image/video URL (bg=image/video/image_person)."""
+    start: float
+    end: float
+    template: int = 1
+    position: str = "bottom"
+    bg: str = "dim"
+    media_url: Optional[str] = None
+    # Multiplies every template line's font size (0.4–2.0, 1.0 = as designed).
+    text_scale: float = 1.0
+    # Max words shown per screen-fill (stanza) — 0 = auto (fill by line capacity).
+    max_words: int = 5
+
+
 class GrowSegment(BaseModel):
     """A time window where the TOP slot GROWS taller, covering the top edge of the
     (unchanged) bottom slot — an emphasis effect. `top_frac` = the grown top-slot
@@ -298,6 +324,9 @@ class RenderRequest(BaseModel):
     # Multi-segment KEEP trim: only these windows are kept (concatenated); the
     # rest is dropped at render. Overrides render_start/render_end when set.
     keep_segments: list[KeepSegment] = Field(default_factory=list)
+    # Spotlight FX windows: big progressive captions over a treated background;
+    # inside these windows the normal captions + arranged scene are overridden.
+    fx_windows: list[FxWindow] = Field(default_factory=list)
     # Optional intro card (thumbnail + voiceover + transition) prepended at render.
     intro: Optional[IntroConfig] = None
     # Windows where the TOP slot grows taller (covering the top of the bottom slot).
@@ -417,3 +446,4 @@ class QueueJobPatch(BaseModel):
     grow_segments: Optional[str] = None  # top-slot grow windows (JSON list)
     zoom_segments: Optional[str] = None  # top-slot punch-in zoom windows (JSON list)
     combo_segments: Optional[str] = None  # top-slot grow+zoom windows (JSON list)
+    fx_windows: Optional[str] = None     # Spotlight FX windows (JSON list)

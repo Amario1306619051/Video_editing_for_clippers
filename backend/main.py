@@ -146,6 +146,7 @@ def api_render(req: RenderRequest):
             grow_segments=req.grow_segments,
             zoom_segments=req.zoom_segments,
             combo_segments=req.combo_segments,
+            fx_windows=req.fx_windows,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -374,6 +375,24 @@ def api_search(req: SearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"candidates": candidates}
+
+
+@app.post("/api/search-videos", response_model=SearchResponse)
+def api_search_videos(req: SearchRequest):
+    """FREE stock VIDEO search (Pexels Videos) for the Spotlight-FX video
+    background. Same candidate shape as the image search."""
+    try:
+        candidates = pexels.search_videos(req.query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"candidates": candidates}
+
+
+@app.get("/api/fx-templates")
+def api_fx_templates():
+    """The Spotlight-FX text templates (fonts/sizes/colors per line) — single
+    source of truth for the frontend's template picker previews."""
+    return {"templates": renderer.FX_TEMPLATES}
 
 
 @app.post("/api/tts-preview")

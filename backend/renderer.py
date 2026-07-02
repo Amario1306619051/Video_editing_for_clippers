@@ -214,6 +214,279 @@ def _overlay_dialogues(text_overlays, rs: float, re_: Optional[float]) -> list[s
     return lines
 
 
+# ───────────────────────── Spotlight FX (big progressive captions) ──────────
+# 10 line-stack templates. Each = 3 stacked lines with its own font/size/color
+# (2 colors per template, mixed fonts allowed but visually matching). Text is
+# ALL-CAPS, fat black outline + shadow so it reads over any background. Words
+# APPEAR as they're spoken (accumulate: "KETIKA" → "KETIKA BAHAS" → …) — no
+# per-word recolor/highlight (that's the normal karaoke caption, not this).
+FX_TEMPLATES = [
+    # Line props: font, fs, color; optional per line —
+    #   box:   "#RRGGBB" → the line sits on a filled label band (CapCut pill look)
+    #   box_text: text color on the band (default near-black)
+    #   hollow: True → outline-only text (fill transparent, thick colored outline)
+    #   italic: True, upper: False (keep original case), spacing: extra px tracking
+    #   alt:   [colors...] → WORDS alternate through these colors (Hormozi style)
+    # Template prop: rot: degrees → the whole block is tilted (sticker look).
+    {"id": 1, "name": "Impact Stack",  "lines": [
+        {"font": "Anton", "fs": 150, "color": "#FFFFFF"},
+        {"font": "Anton", "fs": 96,  "color": "#FFFFFF"},
+        {"font": "Anton", "fs": 96,  "color": "#F7D708"}]},
+    {"id": 2, "name": "Hormozi Punch", "lines": [
+        {"font": "Archivo Black", "fs": 108, "color": "#FFFFFF",
+         "alt": ["#FFFFFF", "#FFD400", "#7CFF4D", "#FF3B3B"]},
+        {"font": "Archivo Black", "fs": 108, "color": "#FFFFFF",
+         "alt": ["#FFD400", "#FFFFFF", "#FF3B3B", "#7CFF4D"]}]},
+    {"id": 3, "name": "Yellow Label",  "lines": [
+        {"font": "Poppins", "fs": 72,  "color": "#111111", "box": "#FFD400", "box_text": "#111111"},
+        {"font": "Anton",   "fs": 148, "color": "#FFFFFF"},
+        {"font": "Anton",   "fs": 94,  "color": "#FFFFFF"}]},
+    {"id": 4, "name": "Comic Pop",     "lines": [
+        {"font": "Bangers", "fs": 150, "color": "#3BE8FF"},
+        {"font": "Bangers", "fs": 104, "color": "#FFFFFF"},
+        {"font": "Bangers", "fs": 104, "color": "#3BE8FF"}]},
+    {"id": 5, "name": "Tall Orange",   "lines": [
+        {"font": "Bebas Neue", "fs": 112, "color": "#FFFFFF"},
+        {"font": "Bebas Neue", "fs": 168, "color": "#FF9D2E"},
+        {"font": "Bebas Neue", "fs": 112, "color": "#FFFFFF"}]},
+    {"id": 6, "name": "Handwritten",   "lines": [
+        {"font": "Permanent Marker", "fs": 84,  "color": "#7CFF4D", "upper": False},
+        {"font": "Permanent Marker", "fs": 118, "color": "#FFFFFF", "upper": False},
+        {"font": "Permanent Marker", "fs": 84,  "color": "#7CFF4D", "upper": False}]},
+    {"id": 7, "name": "Urban Block",   "lines": [
+        {"font": "Bungee", "fs": 118, "color": "#FFFFFF"},
+        {"font": "Bungee", "fs": 86,  "color": "#FF4DA6"},
+        {"font": "Bungee", "fs": 86,  "color": "#FFFFFF"}]},
+    {"id": 8, "name": "Hollow Hype",   "lines": [
+        {"font": "Anton", "fs": 150, "color": "#FFFFFF", "hollow": True},
+        {"font": "Anton", "fs": 150, "color": "#FFD400"}]},
+    {"id": 9, "name": "Red Alert",     "lines": [
+        {"font": "Archivo Black", "fs": 66,  "color": "#FFFFFF", "box": "#E01D1D", "box_text": "#FFFFFF"},
+        {"font": "Archivo Black", "fs": 126, "color": "#FFFFFF"},
+        {"font": "Archivo Black", "fs": 82,  "color": "#FFFFFF"}]},
+    {"id": 10, "name": "Goofy Bold",   "lines": [
+        {"font": "Luckiest Guy", "fs": 132, "color": "#FFD23F"},
+        {"font": "Luckiest Guy", "fs": 94,  "color": "#FFFFFF"},
+        {"font": "Luckiest Guy", "fs": 94,  "color": "#FFD23F"}]},
+    {"id": 11, "name": "News Flash",   "lines": [
+        {"font": "Oswald", "fs": 84,  "color": "#FFFFFF"},
+        {"font": "Anton",  "fs": 148, "color": "#FFFFFF"},
+        {"font": "Oswald", "fs": 90,  "color": "#FF3B3B"}]},
+    {"id": 12, "name": "Elegant Quote", "lines": [
+        {"font": "Bricolage Grotesque", "fs": 70,  "color": "#FFFFFF", "italic": True, "upper": False},
+        {"font": "Bricolage Grotesque", "fs": 126, "color": "#FFFFFF", "italic": True, "upper": False},
+        {"font": "Oswald",              "fs": 58,  "color": "#FFD400", "spacing": 14}]},
+    {"id": 13, "name": "Minimal Soft", "lines": [
+        {"font": "Poppins", "fs": 72, "color": "#FFFFFF", "upper": False},
+        {"font": "Poppins", "fs": 72, "color": "#9BE8FF", "upper": False}]},
+    {"id": 14, "name": "Sticker Tilt", "rot": -5, "lines": [
+        {"font": "Luckiest Guy", "fs": 138, "color": "#FFD23F"},
+        {"font": "Bangers",      "fs": 100, "color": "#FFFFFF"}]},
+    {"id": 15, "name": "Mono Terminal", "lines": [
+        {"font": "JetBrains Mono", "fs": 66,  "color": "#7CFF4D"},
+        {"font": "JetBrains Mono", "fs": 104, "color": "#FFFFFF"},
+        {"font": "JetBrains Mono", "fs": 66,  "color": "#7CFF4D"}]},
+]
+
+
+def _fx_line_budget(fs: int) -> int:
+    """~how many characters fit on one centered line at font size fs (1080 wide,
+    ~90% usable). Display fonts average ≈0.52·fs per glyph."""
+    return max(4, int(970 / (0.52 * fs)))
+
+
+def _fx_stanzas(words: list[dict], template: dict, max_words: int = 0) -> list[list[dict]]:
+    """Chunk a window's words into stanzas that fill the template's lines by char
+    budget. Each word gets `line`. A full stanza clears the screen and the next
+    one starts fresh. `max_words` > 0 caps how many words one screen shows
+    (flushes early even when the lines aren't full)."""
+    stanzas: list[list[dict]] = []
+    cur: list[dict] = []
+    line = 0
+    used = 0
+    budgets = [max(3, int(_fx_line_budget(l["fs"]) * (0.8 if l.get("box") else 1.0)))
+               for l in template["lines"]]   # label-band lines keep a little padding
+    for w in words:
+        t = w["text"].strip()
+        if not t:
+            continue
+        need = len(t) + (1 if used else 0)
+        while used and used + need > budgets[line]:
+            line += 1
+            used = 0
+            need = len(t)
+            if line >= len(budgets):          # stanza full → flush
+                stanzas.append(cur)
+                cur = []
+                line = 0
+                break
+        cur.append({**w, "line": line})
+        used += need
+        if max_words and len(cur) >= max_words:   # word cap → clear the screen
+            stanzas.append(cur)
+            cur = []
+            line = 0
+            used = 0
+    if cur:
+        stanzas.append(cur)
+    return stanzas
+
+
+def _fx_pos_tag(position: str) -> str:
+    if position == "top":
+        return f"{{\\an8\\pos({OUT_W // 2},170)}}"
+    if position == "middle":
+        return f"{{\\an5\\pos({OUT_W // 2},{OUT_H // 2})}}"
+    return f"{{\\an2\\pos({OUT_W // 2},{OUT_H - 150})}}"   # bottom (default)
+
+
+def _fx_dialogues(words: list[Word], fx_windows, rs: float, re_: Optional[float]) -> list[str]:
+    """ASS Dialogue lines for every Spotlight FX window: per spoken word one
+    Dialogue showing everything revealed SO FAR in the stanza (accumulate), each
+    line with its template font/size/color. Word times are already rs-shifted
+    (same as the caption words), so windows are rebased here too."""
+    out: list[str] = []
+    for fx in (fx_windows or []):
+        a = float(getattr(fx, "start", 0.0)) - rs
+        b = float(getattr(fx, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        if re_ is not None:
+            b = min(b, re_ - rs)
+        tpl = FX_TEMPLATES[max(1, min(len(FX_TEMPLATES), int(getattr(fx, "template", 1) or 1))) - 1]
+        sc = max(0.4, min(2.0, float(getattr(fx, "text_scale", 1.0) or 1.0)))
+        if abs(sc - 1.0) > 1e-3:   # scaled copy — proportions kept, budgets adapt
+            tpl = {**tpl, "lines": [{**l, "fs": max(24, int(round(l["fs"] * sc)))} for l in tpl["lines"]]}
+        pos = _fx_pos_tag(getattr(fx, "position", "bottom") or "bottom")
+        rot = float(tpl.get("rot") or 0)
+        if rot:
+            pos = pos[:-1] + f"\\frz{-rot:g}}}"   # tilt the whole block (sticker look)
+        win_words = [{"text": w.word, "start": w.start, "end": w.end}
+                     for w in words if a <= (w.start + w.end) / 2 < b]
+        if not win_words:
+            continue
+        stanzas = _fx_stanzas(win_words, tpl, int(getattr(fx, 'max_words', 0) or 0))
+        for si, st in enumerate(stanzas):
+            n = len(st)
+            # the last reveal holds a beat, but NEVER into the next stanza (they
+            # share the same screen position — overlap would stack the text)
+            nxt_start = stanzas[si + 1][0]["start"] if si + 1 < len(stanzas) else b
+            for j in range(n):
+                seg_start = max(a, st[j]["start"])
+                if j + 1 < n:
+                    seg_end = st[j + 1]["start"]
+                else:                                    # last reveal holds a beat
+                    seg_end = min(b, st[j]["end"] + 0.9, nxt_start)
+                if seg_end <= seg_start:
+                    seg_end = seg_start + 0.05
+                # lines revealed so far, styled per the template
+                revealed = st[:j + 1]
+                parts = []
+                for li, spec in enumerate(tpl["lines"]):
+                    raws = [w["text"] for w in revealed if w["line"] == li]
+                    if not raws:
+                        continue
+                    upper = spec.get("upper", True)
+                    toks = [_ass_escape(t.upper() if upper else t) for t in raws]
+                    fs = spec["fs"]
+                    # ASS override tags PERSIST across \N within one event — every
+                    # line must set the full set explicitly or the previous line's
+                    # band color / hollow alpha / italic bleeds into it.
+                    ital = "\\i1" if spec.get("italic") else "\\i0"
+                    spac = f"\\fsp{int(spec.get('spacing') or 0)}"
+                    if spec.get("box"):
+                        # CapCut label band: thick colored outline merges into a bar
+                        band = to_ass_color(spec["box"])
+                        txtc = to_ass_color(spec.get("box_text", "#111111"))
+                        bord = max(10, int(fs * 0.30))
+                        ov = (f"{{\\fn{spec['font']}\\fs{fs}\\1a&H00&\\1c{txtc}\\3c{band}\\3a&H00&"
+                              f"\\bord{bord}\\shad0\\b1{ital}{spac}}}")
+                        parts.append(ov + " ".join(toks))
+                        continue
+                    bord = max(6, fs // 14)
+                    if spec.get("hollow"):
+                        # outline-only text: transparent fill + thick colored outline
+                        col = to_ass_color(spec["color"])
+                        ov = (f"{{\\fn{spec['font']}\\fs{fs}\\1a&HFF&\\3c{col}\\3a&H00&"
+                              f"\\bord{max(4, fs // 22)}\\shad0\\b1{ital}{spac}}}")
+                        parts.append(ov + " ".join(toks))
+                        continue
+                    base = (f"{{\\fn{spec['font']}\\fs{fs}\\1a&H00&\\3c&H000000&\\3a&H00&"
+                            f"\\bord{bord}\\shad4\\b1{ital}{spac}}}")
+                    alt = spec.get("alt")
+                    if alt:
+                        # Hormozi style: WORDS cycle through the alt colors
+                        colored = "".join(
+                            f"{{\\1c{to_ass_color(alt[k % len(alt)])}}}{t} "
+                            for k, t in enumerate(toks)).rstrip()
+                        parts.append(base + colored)
+                    else:
+                        col = to_ass_color(spec["color"])
+                        parts.append(base + f"{{\\1c{col}}}" + " ".join(toks))
+                if not parts:
+                    continue
+                text = pos + "\\N".join(parts)
+                out.append(
+                    f"Dialogue: 1,{_fmt_ass_time(seg_start)},{_fmt_ass_time(seg_end)},Caption,,0,0,0,,{text}")
+    return out
+
+
+def _in_fx_windows(t: float, fx_windows, rs: float) -> bool:
+    """Is (already rs-shifted) time t inside any FX window? Used to suppress the
+    normal captions/overlays there — the FX text replaces them."""
+    for fx in (fx_windows or []):
+        if (float(fx.start) - rs) <= t < (float(fx.end) - rs):
+            return True
+    return False
+
+
+def _box_value_at(kfs: list[Keyframe], t: float) -> Optional[dict]:
+    """Evaluate a keyframe track at time t in python (hold/linear, gaps → None).
+    Used by the FX 'image_person' background to cut the subject at the window
+    start (a static box is fine for a short FX window)."""
+    real = sorted([k for k in (kfs or [])], key=lambda k: k.t)
+    if not real:
+        return None
+    cur = real[0]
+    for i, k in enumerate(real):
+        if t < k.t:
+            break
+        cur = k
+        if (getattr(k, "interp", "hold") or "hold") == "linear" and i + 1 < len(real) and not getattr(real[i + 1], "gap", False):
+            k1 = real[i + 1]
+            if k.t <= t < k1.t and k1.t > k.t:
+                f = (t - k.t) / (k1.t - k.t)
+                return {"x": k.x + (k1.x - k.x) * f, "y": k.y + (k1.y - k.y) * f,
+                        "w": k.w + (k1.w - k.w) * f, "h": k.h + (k1.h - k.h) * f, "gap": False}
+    if getattr(cur, "gap", False):
+        return None
+    return {"x": cur.x, "y": cur.y, "w": cur.w, "h": cur.h, "gap": False}
+
+
+def _fetch_fx_media(job_id: str, url: str, kind: str) -> Path:
+    """Download an FX background image/video into temp/ (hash-dedup, extension
+    kept so the demuxer sniff is trivial). /temp/ URLs are already local."""
+    if url.startswith("/temp/"):
+        local = TEMP_DIR / Path(url).name
+        if not local.exists():
+            raise FileNotFoundError(f"uploaded media missing: {url}")
+        return local
+    import hashlib
+    import requests as _rq
+    ext = Path(url.split("?")[0]).suffix.lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".webm"):
+        ext = ".mp4" if kind == "video" else ".jpg"
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    dest = TEMP_DIR / f"{job_id}_fx_{digest}{ext}"
+    if dest.exists():
+        return dest
+    resp = _rq.get(url, timeout=60)
+    resp.raise_for_status()
+    dest.write_bytes(resp.content)
+    return dest
+
+
 def _build_ass(groups: list[dict], font: str, size: int, caption_y_for,
                style: str = "color", color: str = "yellow") -> str:
     """`caption_y_for` is either an int (single y for all groups) or a callable
@@ -1267,6 +1540,7 @@ def render(
     grow_segments: Optional[list[GrowSegment]] = None,
     zoom_segments: Optional[list[ZoomSegment]] = None,
     combo_segments: Optional[list[ComboSegment]] = None,
+    fx_windows: Optional[list] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> dict:
     if not box1 and not box2:
@@ -1378,13 +1652,33 @@ def render(
                 return _pos_y(p, t)
         return _pos_y(caption_pos, t)
 
-    # Build ASS subtitles
+    # Build ASS subtitles. Inside a Spotlight-FX window the normal karaoke
+    # captions + user text overlays are SUPPRESSED — the FX progressive text
+    # replaces them (the arranged scene is covered by the FX background too).
     groups = _group_words(words) if words else []
+    if fx_windows:
+        groups = [g for g in groups
+                  if not _in_fx_windows((g["start"] + g["end"]) / 2, fx_windows, rs)]
     ass_text = _build_ass(groups, caption_font, caption_size, _caption_y_for,
                           style=caption_style, color=caption_color)
     overlay_lines = _overlay_dialogues(text_overlays, rs, re_)
-    if overlay_lines:
-        ass_text = ass_text.rstrip("\n") + "\n" + "\n".join(overlay_lines) + "\n"
+    if fx_windows and overlay_lines:
+        # overlay dialogue times are already rebased → compare with rs=0
+        def _ov_mid(line: str) -> float:
+            try:
+                p = line.split(",")
+                h1, m1, s1 = p[1].split(":"); h2, m2, s2 = p[2].split(":")
+                t1 = int(h1) * 3600 + int(m1) * 60 + float(s1)
+                t2 = int(h2) * 3600 + int(m2) * 60 + float(s2)
+                return (t1 + t2) / 2
+            except Exception:  # noqa: BLE001
+                return -1.0
+        overlay_lines = [ln for ln in overlay_lines
+                         if not _in_fx_windows(_ov_mid(ln) + 0.0, fx_windows, rs)]
+    fx_lines = _fx_dialogues(words, fx_windows, rs, re_) if fx_windows else []
+    extra_lines = overlay_lines + fx_lines
+    if extra_lines:
+        ass_text = ass_text.rstrip("\n") + "\n" + "\n".join(extra_lines) + "\n"
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
@@ -1535,6 +1829,104 @@ def render(
         )
         last = nxt
 
+    # ── Spotlight FX backgrounds — cover the composed scene during each window
+    # (the FX text burns later via ASS, so it stays on top). Rebased like the
+    # cutaways; media (image/video) becomes extra inputs AFTER the stickers.
+    fx_entries: list[dict] = []      # {a,b,bg,path|None,person|None}
+    for fx in (fx_windows or []):
+        a = float(getattr(fx, "start", 0.0)) - rs
+        b = float(getattr(fx, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        if re_ is not None:
+            b = min(b, re_ - rs)
+        if b <= a + 0.05:
+            continue
+        bg = (getattr(fx, "bg", "dim") or "dim").lower()
+        ent: dict = {"a": a, "b": b, "bg": bg, "path": None, "person": None, "keep_slot": False}
+        if bg in ("image", "video", "image_person"):
+            url = getattr(fx, "media_url", None)
+            if url:
+                try:
+                    ent["path"] = _fetch_fx_media(
+                        job_id, url, "video" if bg == "video" else "image")
+                except Exception:  # noqa: BLE001 — media fetch failure → dim fallback
+                    ent["bg"] = "dim"
+            else:
+                ent["bg"] = "dim"
+        if bg == "image_person" and ent["path"] is not None:
+            pb = _box_value_at(box1 or [], a + 0.05)
+            ent["person"] = pb          # None → plain image bg
+        elif bg in ("dim", "blur"):
+            # "surrounding goes dark/blurry, the main subject does NOT": the
+            # subject's slot (box1 = top slot in the two-box layout) is re-drawn
+            # UNTREATED at its own position. Single-box / no box1 → uniform treat.
+            if (box2 and any(not getattr(k, "gap", False) for k in (box2 or []))
+                    and _box_value_at(box1 or [], a + 0.05)):
+                ent["keep_slot"] = True
+        fx_entries.append(ent)
+
+    fx_out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
+    dim_expr = "+".join(f"between(t,{_fmt_num(e['a'])},{_fmt_num(e['b'])})"
+                        for e in fx_entries if e["bg"] == "dim")
+    blur_expr = "+".join(f"between(t,{_fmt_num(e['a'])},{_fmt_num(e['b'])})"
+                         for e in fx_entries if e["bg"] == "blur")
+    keep_expr = "+".join(f"between(t,{_fmt_num(e['a'])},{_fmt_num(e['b'])})"
+                         for e in fx_entries if e["keep_slot"])
+    fx_pre = None
+    if keep_expr:
+        parts.append(f"[{last}]split=2[fxmain][fxpre]")
+        last = "fxmain"
+        fx_pre = "fxpre"
+    if dim_expr:
+        parts.append(
+            f"color=c=black@0.62:s={OUT_W}x{OUT_H}:r={OUT_FPS}:d={max(1.0, fx_out_dur):.3f},format=rgba[fxdim]")
+        parts.append(f"[{last}][fxdim]overlay=enable='{dim_expr}':eof_action=pass[bfxd]")
+        last = "bfxd"
+    if blur_expr:
+        parts.append(
+            f"[{last}]split=2[fxsa][fxsb];"
+            f"[fxsb]boxblur=luma_radius=22:luma_power=2:chroma_radius=11,"
+            f"eq=brightness=-0.28:saturation=0.9[fxbl];"
+            f"[fxsa][fxbl]overlay=enable='{blur_expr}':eof_action=pass[bfxb]")
+        last = "bfxb"
+    fx_media = [e for e in fx_entries if e["path"] is not None]
+    fx_person = [e for e in fx_media if e["person"]]
+    for i, e in enumerate(fx_media):
+        mi = 1 + n_img + len(stk_entries) + i
+        dimval = "-0.30" if e["person"] else "-0.18"
+        parts.append(
+            f"[{mi}:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
+            f"crop={OUT_W}:{OUT_H},setsar=1,eq=brightness={dimval}[fxm{i}]")
+        nxt = f"bfxm{i}"
+        parts.append(
+            f"[{last}][fxm{i}]overlay=enable='between(t,{_fmt_num(e['a'])},{_fmt_num(e['b'])})':"
+            f"eof_action=pass[{nxt}]")
+        last = nxt
+    # image_person: the MAIN SUBJECT (box1 crop, static at the window start) stays
+    # prominent over the image. [0:v] is already consumed by the box chains, so the
+    # SOURCE is fed again as an extra input per person window (same -ss/-t seek).
+    for j, e in enumerate(fx_person):
+        pi = 1 + n_img + len(stk_entries) + len(fx_media) + j
+        p = e["person"]
+        pw, ph = max(2, int(round(p["w"]))), max(2, int(round(p["h"])))
+        px, py = max(0, int(round(p["x"]))), max(0, int(round(p["y"])))
+        parts.append(
+            f"[{pi}:v]crop={pw}:{ph}:{px}:{py},"
+            f"scale=980:1150:force_original_aspect_ratio=decrease,setsar=1[fxp{j}]")
+        nxt = f"bfxp{j}"
+        parts.append(
+            f"[{last}][fxp{j}]overlay=x=(W-w)/2:y=700-h/2:"
+            f"enable='between(t,{_fmt_num(e['a'])},{_fmt_num(e['b'])})':eof_action=pass[{nxt}]")
+        last = nxt
+
+    if fx_pre:
+        parts.append(f"[{fx_pre}]crop={OUT_W}:{TOP_H}:0:0[fxslot]")
+        parts.append(
+            f"[{last}][fxslot]overlay=x=0:y=0:enable='{keep_expr}':eof_action=pass[bfxk]")
+        last = "bfxk"
+
     # Normalize to a constant frame rate before captions / keep-trim. The crop
     # chains mix sources at DIFFERENT rates — the segmented (size-varying) path
     # builds its slot on a `color` base at OUT_FPS, while the expression / blur
@@ -1549,10 +1941,10 @@ def render(
     # Subtitle path escape — Windows drive letters break filter parsing
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
     fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
-    if groups or overlay_lines:
+    if groups or overlay_lines or fx_lines:
         # fontsdir → libass uses the bundled Anton/Bebas Neue instead of a
         # generic host-font fallback (which made captions look plain).
-        # (overlay_lines burn through the same pass even when there's no caption.)
+        # (overlay/FX lines burn through the same pass even when there's no caption.)
         parts.append(f"[{last}]subtitles={ass_path_escaped}:fontsdir={fonts_escaped}[outv]")
         vmap = "[outv]"
     else:
@@ -1563,7 +1955,8 @@ def render(
     has_audio = _probe_has_audio(source_path)
     out_dur = (re_ - rs) if re_ is not None else (max(0.0, src_dur - rs) if src_dur > 0 else 0.0)
     sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
-        sfx, has_audio, out_dur, first_sfx_index=1 + len(img_inputs) + len(stk_entries))
+        sfx, has_audio, out_dur,
+        first_sfx_index=1 + len(img_inputs) + len(stk_entries) + len(fx_media) + len(fx_person))
     if sfx_parts:
         parts.extend(sfx_parts)
     audio_map = amap or "0:a?"
@@ -1615,6 +2008,20 @@ def render(
         win = max(0.1, b - a)
         stk_input_args += ["-itsoffset", f"{a:.3f}", "-loop", "1",
                            "-framerate", "2", "-t", f"{win:.3f}", "-i", str(sp)]
+    # Spotlight-FX media inputs follow the stickers: an image loops over its
+    # window; a stock video stream-loops to fill it. Then one extra SOURCE input
+    # per image_person window (the [0:v] pad is already consumed by the boxes).
+    fx_input_args: list[str] = []
+    for e in fx_media:
+        win = max(0.1, e["b"] - e["a"])
+        if e["bg"] == "video":
+            fx_input_args += ["-stream_loop", "-1", "-itsoffset", f"{e['a']:.3f}",
+                              "-t", f"{win:.3f}", "-i", str(e["path"])]
+        else:
+            fx_input_args += ["-itsoffset", f"{e['a']:.3f}", "-loop", "1",
+                              "-framerate", "2", "-t", f"{win:.3f}", "-i", str(e["path"])]
+    for _e in fx_person:
+        fx_input_args += [*input_seek, "-i", str(source_path)]
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -1628,6 +2035,7 @@ def render(
         "-i", str(source_path),
         *ill_inputs,
         *stk_input_args,
+        *fx_input_args,
         *sfx_inputs,
         "-filter_complex", filter_complex,
         "-map", vmap,

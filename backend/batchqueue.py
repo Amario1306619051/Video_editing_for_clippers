@@ -31,6 +31,7 @@ owner asked for resumable batch progress. The rest of the app stays stateless.
 """
 import ast
 import json
+import re
 import logging
 import sqlite3
 import threading
@@ -46,7 +47,7 @@ import render_remote
 import renderer
 import transcriber
 import vision
-from models import CaptionPosRange, ComboSegment, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Sticker, TextOverlay, Word, ZoomSegment
+from models import CaptionPosRange, ComboSegment, FxWindow, GrowSegment, IllustrationPick, IntroConfig, KeepSegment, Keyframe, SfxPlacement, Sticker, TextOverlay, Word, ZoomSegment
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ _JOB_COLS = [
     # per-clip edits from the Sound / Illustration / Trim / Render steps (JSON blobs)
     "sfx", "illustrations", "keep_segments", "caption", "grow_segments",
     "zoom_segments", "combo_segments", "caption_pos_ranges", "text_overlays", "stickers",
+    "fx_windows",
 ]
 
 
@@ -175,6 +177,7 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN caption_pos_ranges TEXT",
                     "ALTER TABLE jobs ADD COLUMN text_overlays TEXT",
                     "ALTER TABLE jobs ADD COLUMN stickers TEXT",
+                    "ALTER TABLE jobs ADD COLUMN fx_windows TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -263,6 +266,9 @@ def _find(key: str) -> Optional[dict]:
 
 
 # ───────────────────────── import / parse ─────────────────────────
+_URL_LINE_RE = re.compile(r"""["']?url["']?\s*[:=]\s*["']?(https?://[^\s"',]+)""", re.I)
+
+
 def _parse(content: str):
     content = (content or "").strip()
     if not content:
@@ -270,8 +276,90 @@ def _parse(content: str):
     try:
         return json.loads(content)
     except Exception:
+        pass
+    try:
         # Tolerate the Python-dict style the user pastes (single quotes, None…).
         return ast.literal_eval(content)
+    except Exception:
+        # Segmenter pastes often carry ONE malformed line like:  'url: https://…,
+        # (unbalanced quote, colon value). Pull the URL out, drop that line, retry.
+        m = _URL_LINE_RE.search(content)
+        if not m:
+            raise
+        url = m.group(1).rstrip(",")
+        cleaned = "\n".join(ln for ln in content.splitlines() if m.group(0) not in ln)
+        try:
+            data = json.loads(cleaned)
+        except Exception:
+            data = ast.literal_eval(cleaned)
+        if isinstance(data, dict) and "url" not in data:
+            data["url"] = url
+        return data
+
+
+# Default box prompts for the segmenter format (it has no bbox fields) — a
+# kajian/podcast layout: box1 follows the speaker, box2 unset = skipped (the
+# render then runs single-box full-focus). Override with top-level "bbox_1"/
+# "bbox_2" (or "_bbox_1"/"_bbox_2") keys in the JSON.
+_SEG_DEFAULT_BBOX1 = ("the person currently speaking — the main subject on camera "
+                      "(frame the head and upper body)")
+
+
+def _normalize_segmenter(data):
+    """Accept the LLM-segmenter JSON shape:
+      {video_judul_asumsi, bahasa, catatan_umum, url, clips: [
+         {id, inti_pembahasan, start_second, end_second, hook_kalimat,
+          kata_kunci_hook, tipe_emosi_trigger, potensi_platform, catatan_editing}]}
+    → the canonical {url: [clips]} import shape. Returns None when `data` isn't
+    this shape. Clip ids are prefixed with the video id so two segmenter files
+    (ids 1..N each) don't collide/skip in the queue."""
+    if not isinstance(data, dict) or not isinstance(data.get("clips"), list):
+        return None
+    url = str(data.get("url") or data.get("video_url") or data.get("link") or "").strip().rstrip(",")
+    if not url:
+        raise ValueError('segmenter JSON: no "url" found — add "url": "https://…" at the top level')
+    m = re.search(r"[?&]v=([\w-]{6,})", url) or re.search(r"youtu\.be/([\w-]{6,})", url)
+    vid = (m.group(1) if m else re.sub(r"\W+", "", url)[-8:]) or "seg"
+    bbox1 = str(data.get("bbox_1") or data.get("_bbox_1") or _SEG_DEFAULT_BBOX1)
+    bbox2 = str(data.get("bbox_2") or data.get("_bbox_2") or "")
+    judul = str(data.get("video_judul_asumsi") or data.get("video_title") or "").strip()
+
+    out_clips = []
+    for c in data["clips"]:
+        if not isinstance(c, dict):
+            continue
+        raw_id = c.get("id")
+        cid = f"{vid}-{raw_id}" if raw_id is not None else uuid.uuid4().hex[:8]
+        desc_bits = []
+        if c.get("hook_kalimat"):
+            desc_bits.append(f"Hook: {c['hook_kalimat']}")
+        if c.get("kata_kunci_hook"):
+            kk = c["kata_kunci_hook"]
+            desc_bits.append("Keywords: " + (", ".join(map(str, kk)) if isinstance(kk, list) else str(kk)))
+        if c.get("tipe_emosi_trigger"):
+            desc_bits.append(f"Emotion: {c['tipe_emosi_trigger']}")
+        if c.get("potensi_platform"):
+            pp = c["potensi_platform"]
+            desc_bits.append("Platforms: " + (", ".join(map(str, pp)) if isinstance(pp, list) else str(pp)))
+        if c.get("catatan_editing"):
+            desc_bits.append(f"Editing note: {c['catatan_editing']}")
+        if judul:
+            desc_bits.append(f"From: {judul}")
+        out_clips.append({
+            "id": cid,
+            "start": c.get("start_second", c.get("start")),
+            "end": c.get("end_second", c.get("end")),
+            "title": str(c.get("inti_pembahasan") or c.get("title") or cid)[:90],
+            "description": "\n".join(desc_bits),
+            "bbox_1": str(c.get("bbox_1") or bbox1),
+            "bbox_2": str(c.get("bbox_2") or bbox2),
+        })
+    out = {url: out_clips}
+    # pass the underscore file-level knobs through when present
+    for k in ("_context", "_director", "_diarization", "_expect"):
+        if k in data:
+            out[k] = data[k]
+    return out
 
 
 def _to_hhmmss(v) -> Optional[str]:
@@ -353,6 +441,9 @@ def import_text(content: str, room_id=None) -> dict:
     data = _parse(content)
     if not isinstance(data, dict):
         raise ValueError("top level must be an object keyed by video URL")
+    seg = _normalize_segmenter(data)
+    if seg is not None:
+        data = seg
     # File-level shared context: a top-level "_context" key (underscore = clearly
     # not a URL) becomes the default `context` for every clip in the file.
     default_context = str(data.pop("_context", "") or "")
@@ -459,7 +550,7 @@ def save_job(key: str, patch: dict) -> Optional[dict]:
                ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
                 "thumbnail", "sfx", "illustrations", "keep_segments", "caption", "transcript",
                 "grow_segments", "zoom_segments", "combo_segments", "caption_pos_ranges",
-                "text_overlays", "stickers")
+                "text_overlays", "stickers", "fx_windows")
                if k in patch}
     if not allowed:
         return _find(key)
@@ -951,6 +1042,7 @@ def _render_one(job: dict) -> None:
     cap_pos_ranges = [CaptionPosRange(**r) for r in _pj(job.get("caption_pos_ranges"), []) if isinstance(r, dict)]
     text_overlays = [TextOverlay(**t) for t in _pj(job.get("text_overlays"), []) if isinstance(t, dict)]
     stickers = [Sticker(**s) for s in _pj(job.get("stickers"), []) if isinstance(s, dict)]
+    fxs = [FxWindow(**f) for f in _pj(job.get("fx_windows"), []) if isinstance(f, dict)]
     # Intro card (lives inside the saved thumbnail config). When enabled, the
     # frontend uploaded temp/{job}_intro.png on ▶; _prepend_intro applies the
     # transition (incl. crumple + its SFX) and is a no-op if the PNG is missing.
@@ -973,7 +1065,9 @@ def _render_one(job: dict) -> None:
     # uploaded cutaways are user files that live ONLY on this box — all of those force
     # a LOCAL render. A remote miss (all boxes busy/down/errored) returns None and
     # falls through to the local render below.
-    _local_assets = bool(stickers) or any((getattr(c, "url", "") or "").startswith("/temp/") for c in ills)
+    _local_assets = (bool(stickers)
+                     or any((getattr(c, "url", "") or "").startswith("/temp/") for c in ills)
+                     or any((getattr(f, "media_url", "") or "").startswith("/temp/") for f in fxs))
     if render_remote.enabled() and not sfx and not _local_assets:
         params = {
             "title": title,
@@ -994,6 +1088,7 @@ def _render_one(job: dict) -> None:
             "combo_segments": [c.model_dump() for c in combo],
             "illustrations": [c.model_dump() for c in ills],
             "intro": intro.model_dump() if intro else None,
+            "fx_windows": [f.model_dump() for f in fxs],
         }
         intro_png = (renderer.TEMP_DIR / f"{job['job_id']}_intro.png") if intro else None
         _update(key, message="rendering on a GPU box… 0%")
@@ -1035,7 +1130,7 @@ def _render_one(job: dict) -> None:
                 text_overlays=text_overlays or None, stickers=stickers or None,
                 keep_segments=keep or None, sfx=sfx or None, illustrations=ills or None,
                 intro=intro, grow_segments=grow or None, zoom_segments=zoom or None,
-                combo_segments=combo or None,
+                combo_segments=combo or None, fx_windows=fxs or None,
                 progress_cb=_on_progress,
             )
         except Exception as e:  # noqa: BLE001
